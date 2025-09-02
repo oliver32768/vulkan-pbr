@@ -1,7 +1,7 @@
-﻿//> includes
+﻿// includes
 #include "vk_engine.h"
 
-//bootstrap library
+// bootstrap library
 #include "VkBootstrap.h"
 
 #include <SDL.h>
@@ -9,6 +9,7 @@
 
 #include <vk_initializers.h>
 #include <vk_types.h>
+#include <vk_images.h>
 
 #include <chrono>
 #include <thread>
@@ -18,11 +19,33 @@ constexpr bool bUseValidationLayers = true;
 VulkanEngine* loadedEngine = nullptr;
 
 void VulkanEngine::init_commands() {
-    return;
+    // create a command pool for commands submitted to the graphics queue.
+    // we also want the pool to allow for resetting of individual command buffers
+    VkCommandPoolCreateInfo commandPoolInfo = vkinit::command_pool_create_info(_graphicsQueueFamily, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT);
+    for (int i = 0; i < FRAME_OVERLAP; i++) {
+        VK_CHECK(vkCreateCommandPool(_device, &commandPoolInfo, nullptr, &_frames[i]._commandPool));
+        VkCommandBufferAllocateInfo cmdAllocInfo = vkinit::command_buffer_allocate_info(_frames[i]._commandPool, 1);
+        VK_CHECK(vkAllocateCommandBuffers(_device, &cmdAllocInfo, &_frames[i]._mainCommandBuffer));
+    }
 }
 
 void VulkanEngine::init_sync_structures() {
-    return;
+    // create syncronization structures
+    // one fence to control when the gpu has finished rendering the frame,
+    // and 2 semaphores to syncronize rendering with swapchain
+    // we want the fence to start signalled so we can wait on it on the first frame
+    VkFenceCreateInfo fenceCreateInfo = vkinit::fence_create_info(VK_FENCE_CREATE_SIGNALED_BIT);
+    VkSemaphoreCreateInfo semaphoreCreateInfo = vkinit::semaphore_create_info();
+
+    for (int i = 0; i < FRAME_OVERLAP; i++) {
+        VK_CHECK(vkCreateFence(_device, &fenceCreateInfo, nullptr, &_frames[i]._renderFence));   
+        VK_CHECK(vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &_frames[i]._swapchainSemaphore));
+    }
+
+    _renderFinishedSemaphores.resize(_swapchainImages.size());
+    for (int i = 0; i < _swapchainImages.size(); i++) {
+        VK_CHECK(vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &_renderFinishedSemaphores[i]));
+    }
 }
 
 void VulkanEngine::destroy_swapchain() {
@@ -101,6 +124,10 @@ void VulkanEngine::init_vulkan() {
     // Get the VkDevice handle used in the rest of a vulkan application
     _device = vkbDevice.device;
     _chosenGPU = physicalDevice.physical_device;
+
+    // use vkbootstrap to get a Graphics queue
+    _graphicsQueue = vkbDevice.get_queue(vkb::QueueType::graphics).value();
+    _graphicsQueueFamily = vkbDevice.get_queue_index(vkb::QueueType::graphics).value();
 }
 
 VulkanEngine& VulkanEngine::Get() { 
@@ -136,6 +163,18 @@ void VulkanEngine::init() {
 
 void VulkanEngine::cleanup() {
     if (_isInitialized) {
+        vkDeviceWaitIdle(_device);
+
+        for (int i = 0; i < FRAME_OVERLAP; i++) {
+            vkDestroyCommandPool(_device, _frames[i]._commandPool, nullptr);
+            vkDestroyFence(_device, _frames[i]._renderFence, nullptr);
+            vkDestroySemaphore(_device, _frames[i]._swapchainSemaphore, nullptr);
+        }
+
+        for (int i = 0; i < _renderFinishedSemaphores.size(); i++) {
+            vkDestroySemaphore(_device, _renderFinishedSemaphores[i], nullptr);
+        }
+
         destroy_swapchain();
 
         vkDestroySurfaceKHR(_instance, _surface, nullptr);
@@ -150,7 +189,77 @@ void VulkanEngine::cleanup() {
 }
 
 void VulkanEngine::draw() {
-    // nothing yet
+    // wait until the gpu has finished rendering the last frame. Timeout of 1 second
+    VK_CHECK(vkWaitForFences(_device, 1, &get_current_frame()._renderFence, true, 1000000000));
+    VK_CHECK(vkResetFences(_device, 1, &get_current_frame()._renderFence));
+
+    uint32_t swapchainImageIndex;
+    VK_CHECK(vkAcquireNextImageKHR(_device, _swapchain, 1000000000, get_current_frame()._swapchainSemaphore, nullptr, &swapchainImageIndex));
+
+    // renaming buffer handle for shorter writing
+    // Vulkan handles are just a 64 bit handle/pointer, so its fine to copy them around, but remember that their actual data is handled by vulkan itself
+    VkCommandBuffer cmd = get_current_frame()._mainCommandBuffer;
+
+    // now that we are sure that the commands finished executing, we can safely
+    // reset the command buffer to begin recording again.
+    VK_CHECK(vkResetCommandBuffer(cmd, 0));
+
+    // begin the command buffer recording. 
+    // flags: 1 submit per frame before the command buffer is reset
+    VkCommandBufferBeginInfo cmdBeginInfo = vkinit::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+
+    // --- start rec ---
+    VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
+
+    // transition: undefined -> generic r/w
+    // "If you want a read-only image or a image to be used with rasterization commands, there are better options."
+    vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+
+    VkClearColorValue clearValue;
+    float flash = std::abs(std::sin(_frameNumber / 120.f));
+    clearValue = { { 0.0f, 0.0f, flash, 1.0f } };
+
+    VkImageSubresourceRange clearRange = vkinit::image_subresource_range(VK_IMAGE_ASPECT_COLOR_BIT);
+    vkCmdClearColorImage(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_GENERAL, &clearValue, 1, &clearRange);
+
+    // transition: generic r/w -> presentable
+    vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+    // --- end rec ---
+    VK_CHECK(vkEndCommandBuffer(cmd));
+
+    // prepare the submission to the queue. 
+    // we want to wait on the _presentSemaphore, as that semaphore is signaled when the swapchain is ready
+    // we will signal the _renderSemaphore, to signal that rendering has finished
+    VkCommandBufferSubmitInfo cmdinfo = vkinit::command_buffer_submit_info(cmd);
+
+    // don't begin until swapchain image is ready (i.e. vkAcquireNextImageKHR is signalling this semaphore, we are waiting on it) 
+    VkSemaphoreSubmitInfo waitInfo = vkinit::semaphore_submit_info(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR, get_current_frame()._swapchainSemaphore);
+
+    // signal the render semaphore once the work we are about to submit finishes; presentation will wait on this semaphore
+    VkSemaphoreSubmitInfo signalInfo = vkinit::semaphore_submit_info(VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, _renderFinishedSemaphores[swapchainImageIndex]);
+
+    // submit command buffer to the queue and execute it.
+    // _renderFence will now block until the graphic commands finish execution
+    VkSubmitInfo2 submit = vkinit::submit_info(&cmdinfo, &signalInfo, &waitInfo);
+    VK_CHECK(vkQueueSubmit2(_graphicsQueue, 1, &submit, get_current_frame()._renderFence));
+
+    // prepare present
+    // this will put the image we just rendered to into the visible window.
+    // we want to wait on the _renderSemaphore for that, 
+    // as its necessary that drawing commands have finished before the image is displayed to the user
+    VkPresentInfoKHR presentInfo = {};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.pNext = nullptr;
+    presentInfo.pSwapchains = &_swapchain;
+    presentInfo.swapchainCount = 1;
+    presentInfo.pWaitSemaphores = &_renderFinishedSemaphores[swapchainImageIndex];
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pImageIndices = &swapchainImageIndex;
+
+    VK_CHECK(vkQueuePresentKHR(_graphicsQueue, &presentInfo));
+
+    _frameNumber++;
 }
 
 void VulkanEngine::run() {
