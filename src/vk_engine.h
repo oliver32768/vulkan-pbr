@@ -4,6 +4,7 @@
 #pragma once
 
 #include <vk_types.h>
+#include <vk_descriptors.h>
 
 struct DeletionQueue {
 	// TODO: if you need to delete thousands of objects and want them deleted faster, 
@@ -64,6 +65,13 @@ public:
 	AllocatedImage _drawImage;
 	VkExtent2D _drawExtent;
 
+	DescriptorAllocator globalDescriptorAllocator;
+	VkDescriptorSet _drawImageDescriptors;
+	VkDescriptorSetLayout _drawImageDescriptorLayout;
+
+	VkPipeline _gradientPipeline;
+	VkPipelineLayout _gradientPipelineLayout;
+
 	bool _isInitialized{ false };
 	int _frameNumber {0};
 	bool stop_rendering{ false };
@@ -84,4 +92,9 @@ private:
 	void destroy_swapchain();
 
 	void draw_background(VkCommandBuffer cmd);
+
+	void init_descriptors();
+
+	void init_pipelines();
+	void init_background_pipelines();
 };
