@@ -5,6 +5,26 @@
 
 #include <vk_types.h>
 
+struct DeletionQueue {
+	// TODO: if you need to delete thousands of objects and want them deleted faster, 
+	// a better implementation would be to store arrays of vulkan handles of various types such as VkImage, VkBuffer, and so on. 
+	// And then delete those from a loop.
+	std::deque<std::function<void()>> deletors;
+
+	void push_function(std::function<void()>&& function) {
+		deletors.push_back(function);
+	}
+
+	void flush() {
+		// reverse iterate the deletion queue to execute all the functions
+		for (auto it = deletors.rbegin(); it != deletors.rend(); it++) {
+			(*it)(); // call functors
+		}
+
+		deletors.clear();
+	}
+};
+
 constexpr unsigned int FRAME_OVERLAP = 2;
 
 struct FrameData {
@@ -13,8 +33,9 @@ struct FrameData {
 
 	VkSemaphore _swapchainSemaphore; // swapchain image acquisition from OS
 	VkFence _renderFence; // lets us wait for the draw commands of a given frame to be finished
-};
 
+	DeletionQueue _deletionQueue;
+};
 
 class VulkanEngine {
 public:
@@ -36,6 +57,13 @@ public:
 	VkQueue _graphicsQueue;
 	uint32_t _graphicsQueueFamily;
 
+	DeletionQueue _mainDeletionQueue;
+
+	VmaAllocator _allocator;
+
+	AllocatedImage _drawImage;
+	VkExtent2D _drawExtent;
+
 	bool _isInitialized{ false };
 	int _frameNumber {0};
 	bool stop_rendering{ false };
@@ -54,4 +82,6 @@ private:
 
 	void create_swapchain(uint32_t width, uint32_t height);
 	void destroy_swapchain();
+
+	void draw_background(VkCommandBuffer cmd);
 };
