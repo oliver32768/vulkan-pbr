@@ -6,6 +6,22 @@
 #include <vk_types.h>
 #include <vk_descriptors.h>
 
+struct ComputePushConstants {
+	glm::vec4 data1;
+	glm::vec4 data2;
+	glm::vec4 data3;
+	glm::vec4 data4;
+};
+
+struct ComputeEffect {
+	const char* name;
+
+	VkPipeline pipeline;
+	VkPipelineLayout layout;
+
+	ComputePushConstants data;
+};
+
 struct DeletionQueue {
 	// TODO: if you need to delete thousands of objects and want them deleted faster, 
 	// a better implementation would be to store arrays of vulkan handles of various types such as VkImage, VkBuffer, and so on. 
@@ -72,16 +88,27 @@ public:
 	VkPipeline _gradientPipeline;
 	VkPipelineLayout _gradientPipelineLayout;
 
+	VkFence _immFence;
+	VkCommandBuffer _immCommandBuffer;
+	VkCommandPool _immCommandPool;
+	
+	std::vector<ComputeEffect> backgroundEffects;
+	int currentBackgroundEffect{ 0 };
+
 	bool _isInitialized{ false };
 	int _frameNumber {0};
 	bool stop_rendering{ false };
 	VkExtent2D _windowExtent{ 1700 , 900 };
 	struct SDL_Window* _window{ nullptr }; // forward declaration
+
 	static VulkanEngine& Get();
 	void init();
 	void cleanup();
 	void draw();
 	void run();
+
+	void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
+
 private:
 	void init_vulkan();
 	void init_swapchain();
@@ -97,4 +124,7 @@ private:
 
 	void init_pipelines();
 	void init_background_pipelines();
+
+	void init_imgui();
+	void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
 };
