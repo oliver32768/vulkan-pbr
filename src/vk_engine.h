@@ -95,6 +95,11 @@ public:
 	std::vector<ComputeEffect> backgroundEffects;
 	int currentBackgroundEffect{ 0 };
 
+	VkPipelineLayout _trianglePipelineLayout;
+	VkPipeline _trianglePipeline;
+
+	// Functions
+
 	bool _isInitialized{ false };
 	int _frameNumber {0};
 	bool stop_rendering{ false };
@@ -104,11 +109,14 @@ public:
 	static VulkanEngine& Get();
 	void init();
 	void cleanup();
+	
 	void draw();
 	void run();
 
 	void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
 
+	void init_triangle_pipeline();
+	void draw_geometry(VkCommandBuffer cmd);
 private:
 	void init_vulkan();
 	void init_swapchain();
