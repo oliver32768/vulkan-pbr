@@ -24,6 +24,7 @@ public:
 
     VkPipeline build_pipeline(VkDevice device);
     void set_shaders(VkShaderModule vertexShader, VkShaderModule fragmentShader);
+    void enable_depthtest(bool depthWriteEnable, VkCompareOp op);
     void disable_depthtest();
     void set_color_attachment_format(VkFormat format);
     void set_depth_format(VkFormat format);
