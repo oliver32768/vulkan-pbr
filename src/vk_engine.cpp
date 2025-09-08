@@ -66,7 +66,7 @@ void VulkanEngine::init_mesh_pipeline() {
     pipelineBuilder.set_polygon_mode(VK_POLYGON_MODE_FILL); //filled triangles
     pipelineBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE); //no backface culling
     pipelineBuilder.set_multisampling_none(); //no multisampling
-    pipelineBuilder.disable_blending(); //no blending
+    pipelineBuilder.disable_blending(); // no blending
     pipelineBuilder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL); // yes depth testing
 
     pipelineBuilder.set_color_attachment_format(_drawImage.imageFormat); //connect the image format we will draw into, from draw image
