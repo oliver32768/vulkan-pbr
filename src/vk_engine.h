@@ -56,6 +56,12 @@ struct FrameData {
 
 class VulkanEngine {
 public:
+	bool _isInitialized{ false };
+	int _frameNumber{ 0 };
+	bool stop_rendering{ false };
+	VkExtent2D _windowExtent{ 1700 , 900 };
+	struct SDL_Window* _window{ nullptr }; // forward declaration
+
 	VkInstance _instance;
 	VkDebugUtilsMessengerEXT _debug_messenger;
 	VkPhysicalDevice _chosenGPU;
@@ -98,13 +104,12 @@ public:
 	VkPipelineLayout _trianglePipelineLayout;
 	VkPipeline _trianglePipeline;
 
-	// Functions
+	VkPipelineLayout _meshPipelineLayout;
+	VkPipeline _meshPipeline;
 
-	bool _isInitialized{ false };
-	int _frameNumber {0};
-	bool stop_rendering{ false };
-	VkExtent2D _windowExtent{ 1700 , 900 };
-	struct SDL_Window* _window{ nullptr }; // forward declaration
+	GPUMeshBuffers rectangle; // 'mesh' (ssbos and ptr)
+
+	// Functions
 
 	static VulkanEngine& Get();
 	void init();
@@ -117,6 +122,10 @@ public:
 
 	void init_triangle_pipeline();
 	void draw_geometry(VkCommandBuffer cmd);
+
+	void init_default_data();
+
+	void init_mesh_pipeline();
 private:
 	void init_vulkan();
 	void init_swapchain();
@@ -135,4 +144,9 @@ private:
 
 	void init_imgui();
 	void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
+
+	GPUMeshBuffers uploadMesh(std::span<uint32_t> indices, std::span<Vertex> vertices);
+
+	AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
+	void destroy_buffer(const AllocatedBuffer& buffer);
 };
