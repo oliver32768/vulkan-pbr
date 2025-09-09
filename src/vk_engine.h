@@ -88,6 +88,7 @@ public:
 	AllocatedImage _drawImage;
 	AllocatedImage _depthImage;
 	VkExtent2D _drawExtent;
+	float renderScale = 1.f;
 
 	DescriptorAllocator globalDescriptorAllocator;
 	VkDescriptorSet _drawImageDescriptors;
@@ -108,6 +109,8 @@ public:
 
 	std::vector<std::shared_ptr<MeshAsset>> testMeshes;
 
+	bool resizeRequested;
+
 	// Functions
 
 	static VulkanEngine& Get();
@@ -120,6 +123,8 @@ public:
 	void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
 
 	void draw_geometry(VkCommandBuffer cmd);
+
+	void resize_swapchain();
 
 	void init_default_data();
 
