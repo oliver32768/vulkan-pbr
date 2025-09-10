@@ -34,7 +34,6 @@ public:
     void init(VkDevice device, uint32_t initialSets, std::span<PoolSizeRatio> poolRatios);
     void clear_pools(VkDevice device);
     void destroy_pools(VkDevice device);
-
     VkDescriptorSet allocate(VkDevice device, VkDescriptorSetLayout layout, void* pNext = nullptr);
 private:
     VkDescriptorPool get_pool(VkDevice device);

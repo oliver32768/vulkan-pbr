@@ -7,6 +7,59 @@
 #include <vk_descriptors.h>
 #include <vk_loader.h>
 
+struct GLTFMetallic_Roughness {
+	MaterialPipeline opaquePipeline;
+	MaterialPipeline transparentPipeline;
+
+	VkDescriptorSetLayout materialLayout;
+
+	struct MaterialConstants {
+		glm::vec4 colorFactors;
+		glm::vec4 metal_rough_factors;
+		// "In vulkan, when you want to bind a uniform buffer, it needs to meet a minimum requirement for its alignment. 
+		// 256 bytes is a good default alignment for this which all the gpus we target meet, so we are adding those vec4s to pad the structure to 256 bytes."
+		glm::vec4 extra[14]; 
+	};
+
+	// will be written/bound to descriptor
+	struct MaterialResources {
+		AllocatedImage colorImage; // albedo?
+		VkSampler colorSampler;
+		AllocatedImage metalRoughImage; // metallic / roughness (duh)
+		VkSampler metalRoughSampler;
+		VkBuffer dataBuffer; // material constants 
+		uint32_t dataBufferOffset;
+	};
+
+	DescriptorWriter writer;
+
+	void build_pipelines(VulkanEngine* engine);
+	void clear_resources(VkDevice device);
+
+	MaterialInstance write_material(VkDevice device, MaterialPass pass, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator);
+};
+
+struct MeshNode : public Node {
+	std::shared_ptr<MeshAsset> mesh;
+	// TODO: again, it shouldn't be hard to get rid of runtime polymorphism here
+	virtual void Draw(const glm::mat4& topMatrix, DrawContext& ctx) override;
+};
+
+struct RenderObject {
+	uint32_t indexCount;
+	uint32_t firstIndex;
+	VkBuffer indexBuffer;
+
+	MaterialInstance* material;
+
+	glm::mat4 transform;
+	VkDeviceAddress vertexBufferAddress;
+};
+
+struct DrawContext {
+	std::vector<RenderObject> OpaqueSurfaces;
+};
+
 struct ComputePushConstants {
 	glm::vec4 data1;
 	glm::vec4 data2;
@@ -100,7 +153,7 @@ public:
 	VkExtent2D _drawExtent;
 	float renderScale = 1.f;
 
-	DescriptorAllocator globalDescriptorAllocator;
+	DescriptorAllocatorGrowable globalDescriptorAllocator;
 	VkDescriptorSet _drawImageDescriptors;
 	VkDescriptorSetLayout _drawImageDescriptorLayout;
 
@@ -134,6 +187,12 @@ public:
 
 	// combined texture + sampler
 	VkDescriptorSetLayout _singleImageDescriptorLayout;
+
+	MaterialInstance defaultData;
+	GLTFMetallic_Roughness metalRoughMaterial;
+
+	DrawContext mainDrawContext;
+	std::unordered_map<std::string, std::shared_ptr<Node>> loadedNodes; // meshes
 	
 	// Functions
 
@@ -159,6 +218,8 @@ public:
 	AllocatedImage create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
 	AllocatedImage create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
 	void destroy_image(const AllocatedImage& img);
+
+	void update_scene();
 private:
 	void init_vulkan();
 	void init_swapchain();

@@ -63,3 +63,57 @@ struct GPUDrawPushConstants {
     glm::mat4 worldMatrix;
     VkDeviceAddress vertexBuffer;
 };
+
+enum class MaterialPass :uint8_t {
+    MainColor,
+    Transparent,
+    Other
+};
+
+struct MaterialPipeline {
+    VkPipeline pipeline;
+    VkPipelineLayout layout;
+};
+
+struct MaterialInstance {
+    MaterialPipeline* pipeline; // non-owning (why not just make const)
+    VkDescriptorSet materialSet;
+    MaterialPass passType;
+};
+
+// ---
+
+struct DrawContext;
+
+// base class for a renderable dynamic object
+class IRenderable {
+    virtual void Draw(const glm::mat4& topMatrix, DrawContext& ctx) = 0;
+};
+
+// implementation of a drawable scene node.
+// the scene node can hold children and will also keep a transform to propagate
+// to them
+struct Node : public IRenderable {
+    // parent pointer must be a weak pointer to avoid circular dependencies
+    std::weak_ptr<Node> parent; // non-owning ref. to parent, the lifetime of which is managed by its parents shared_ptr to it (i.e. not this node)
+    std::vector<std::shared_ptr<Node>> children;
+
+    glm::mat4 localTransform;
+    glm::mat4 worldTransform;
+
+    // update child matrices when our local transform changes
+    void refreshTransform(const glm::mat4& parentMatrix) {
+        worldTransform = parentMatrix * localTransform;
+        for (auto c : children) {
+            c->refreshTransform(worldTransform);
+        }
+    }
+
+    // TODO: use structs with tagged unions instead of runtime polymorphism
+    virtual void Draw(const glm::mat4& topMatrix, DrawContext& ctx) {
+        // draw children
+        for (auto& c : children) {
+            c->Draw(topMatrix, ctx);
+        }
+    }
+};

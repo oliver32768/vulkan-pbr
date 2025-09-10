@@ -4,11 +4,14 @@
 #include <unordered_map>
 #include <filesystem>
 
-// sub-mesh
-// we'll use start index as offsets for subsequent draw calls into the same buffer
+struct GLTFMaterial {
+	MaterialInstance data;
+};
+
 struct GeoSurface {
-    uint32_t startIndex;
-    uint32_t count;
+	uint32_t startIndex; // indexed draw offset
+	uint32_t count;
+	std::shared_ptr<GLTFMaterial> material;
 };
 
 struct MeshAsset {
