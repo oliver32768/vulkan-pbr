@@ -14,6 +14,15 @@ struct ComputePushConstants {
 	glm::vec4 data4;
 };
 
+struct GPUSceneData {
+	glm::mat4 view;
+	glm::mat4 proj;
+	glm::mat4 viewproj;
+	glm::vec4 ambientColor;
+	glm::vec4 sunlightDirection; // w for sun power
+	glm::vec4 sunlightColor;
+};
+
 struct ComputeEffect {
 	const char* name;
 
@@ -52,7 +61,8 @@ struct FrameData {
 	VkSemaphore _swapchainSemaphore; // swapchain image acquisition from OS
 	VkFence _renderFence; // lets us wait for the draw commands of a given frame to be finished
 
-	DeletionQueue _deletionQueue;
+	DeletionQueue _deletionQueue; 
+	DescriptorAllocatorGrowable _frameDescriptors;
 };
 
 class VulkanEngine {
@@ -111,6 +121,20 @@ public:
 
 	bool resizeRequested;
 
+	GPUSceneData sceneData;
+	VkDescriptorSetLayout _gpuSceneDataDescriptorLayout;
+
+	// textures initialized in init_default_data
+	VkSampler _defaultSamplerLinear;
+	VkSampler _defaultSamplerNearest;
+	AllocatedImage _whiteImage;
+	AllocatedImage _blackImage;
+	AllocatedImage _greyImage;
+	AllocatedImage _errorCheckerboardImage;
+
+	// combined texture + sampler
+	VkDescriptorSetLayout _singleImageDescriptorLayout;
+	
 	// Functions
 
 	static VulkanEngine& Get();
@@ -131,6 +155,10 @@ public:
 	void init_mesh_pipeline();
 
 	GPUMeshBuffers uploadMesh(std::span<uint32_t> indices, std::span<Vertex> vertices);
+
+	AllocatedImage create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
+	AllocatedImage create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
+	void destroy_image(const AllocatedImage& img);
 private:
 	void init_vulkan();
 	void init_swapchain();
