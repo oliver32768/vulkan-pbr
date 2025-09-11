@@ -520,7 +520,9 @@ void VulkanEngine::init_pipelines() {
 void VulkanEngine::init_descriptors() {
     // draw img descriptor for comp. shader
     std::vector<DescriptorAllocatorGrowable::PoolSizeRatio> sizes = {
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 }
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 }
     };
     globalDescriptorAllocator.init(_device, 10, sizes);
     {
@@ -824,6 +826,8 @@ void VulkanEngine::cleanup() {
             destroy_buffer(mesh->meshBuffers.vertexBuffer);
         }
 
+        metalRoughMaterial.clear_resources(_device);
+
         _mainDeletionQueue.flush();
 
         destroy_swapchain();
@@ -1122,6 +1126,13 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine) {
 
     vkDestroyShaderModule(engine->_device, meshFragShader, nullptr);
     vkDestroyShaderModule(engine->_device, meshVertexShader, nullptr);
+}
+
+void GLTFMetallic_Roughness::clear_resources(VkDevice device) {
+    vkDestroyDescriptorSetLayout(device, materialLayout, nullptr);
+    vkDestroyPipelineLayout(device, transparentPipeline.layout, nullptr); // opaque pipeline uses a handle to the same pipeline layout
+    vkDestroyPipeline(device, transparentPipeline.pipeline, nullptr);
+    vkDestroyPipeline(device, opaquePipeline.pipeline, nullptr);
 }
 
 MaterialInstance GLTFMetallic_Roughness::write_material(VkDevice device, MaterialPass pass, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator) {
