@@ -122,6 +122,7 @@ struct FrameData {
 class VulkanEngine {
 public:
 	Camera mainCamera;
+	double deltaTime;
 
 	bool _isInitialized{ false };
 	int _frameNumber{ 0 };

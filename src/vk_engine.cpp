@@ -858,7 +858,7 @@ void VulkanEngine::update_scene() {
         loadedNodes["Cube"]->Draw(translation * scale, mainDrawContext);
     }
 
-    mainCamera.update();
+    mainCamera.update(deltaTime);
     sceneData.view = mainCamera.getViewMatrix();
     sceneData.proj = glm::perspective(glm::radians(70.f), (float)_windowExtent.width / (float)_windowExtent.height, 10000.f, 0.1f);
     sceneData.proj[1][1] *= -1;
@@ -1008,8 +1008,16 @@ void VulkanEngine::run() {
     SDL_Event e;
     bool bQuit = false;
 
+    Uint64 NOW = SDL_GetPerformanceCounter();
+    Uint64 LAST = 0;
+    deltaTime = 0;
+
     // main loop
     while (!bQuit) {
+        LAST = NOW;
+        NOW = SDL_GetPerformanceCounter();
+        deltaTime = (double)((NOW - LAST) * 1000 / (double)SDL_GetPerformanceFrequency());
+
         while (SDL_PollEvent(&e) != 0) {
             if (e.type == SDL_QUIT) {
                 bQuit = true;

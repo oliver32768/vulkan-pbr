@@ -1,25 +1,26 @@
+#include <fmt/core.h>
 #include <camera.h>
 #include <glm/gtx/transform.hpp>
 #include <glm/gtx/quaternion.hpp>
 
-void Camera::update() {
+void Camera::update(double deltaTime) {
     glm::mat4 cameraRotation = getRotationMatrix();
-    position += glm::vec3(cameraRotation * glm::vec4(velocity * 0.5f, 0.f));
+    position += (float)deltaTime * glm::vec3(cameraRotation * glm::vec4(velocity * 0.025f, 0.f));
 }
 
 void Camera::processSDLEvent(SDL_Event& e) {
-    if (e.type == SDL_KEYDOWN) {
-        if (e.key.keysym.sym == SDLK_w) { velocity.z = -1; }
-        if (e.key.keysym.sym == SDLK_s) { velocity.z = 1; }
-        if (e.key.keysym.sym == SDLK_a) { velocity.x = -1; }
-        if (e.key.keysym.sym == SDLK_d) { velocity.x = 1; }
-    }
+    const Uint8* ks = SDL_GetKeyboardState(nullptr);
 
-    if (e.type == SDL_KEYUP) {
-        if (e.key.keysym.sym == SDLK_w) { velocity.z = 0; }
-        if (e.key.keysym.sym == SDLK_s) { velocity.z = 0; }
-        if (e.key.keysym.sym == SDLK_a) { velocity.x = 0; }
-        if (e.key.keysym.sym == SDLK_d) { velocity.x = 0; }
+    int forward = (ks[SDL_SCANCODE_W] ? 1 : 0) - (ks[SDL_SCANCODE_S] ? 1 : 0);
+    int right = (ks[SDL_SCANCODE_D] ? 1 : 0) - (ks[SDL_SCANCODE_A] ? 1 : 0);
+
+    velocity.x = static_cast<float>(right);
+    velocity.z = static_cast<float>(-forward);
+
+    if (velocity.x != 0.f && velocity.z != 0.f) {
+        const float inv = 0.70710678f; // 1/sqrt(2)
+        velocity.x *= inv;
+        velocity.z *= inv;
     }
 
     if (e.type == SDL_MOUSEMOTION) {
