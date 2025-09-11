@@ -124,6 +124,8 @@ public:
 	Camera mainCamera;
 	double deltaTime;
 
+	std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
+
 	bool _isInitialized{ false };
 	int _frameNumber{ 0 };
 	bool stop_rendering{ false };
@@ -224,6 +226,8 @@ public:
 	void destroy_image(const AllocatedImage& img);
 
 	void update_scene();
+
+	AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
 private:
 	void init_vulkan();
 	void init_swapchain();
@@ -243,6 +247,5 @@ private:
 	void init_imgui();
 	void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
 
-	AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
 	void destroy_buffer(const AllocatedBuffer& buffer);
 };
