@@ -6,6 +6,7 @@
 #include <vk_types.h>
 #include <vk_descriptors.h>
 #include <vk_loader.h>
+#include <camera.h>
 
 struct GLTFMetallic_Roughness {
 	MaterialPipeline opaquePipeline;
@@ -120,6 +121,8 @@ struct FrameData {
 
 class VulkanEngine {
 public:
+	Camera mainCamera;
+
 	bool _isInitialized{ false };
 	int _frameNumber{ 0 };
 	bool stop_rendering{ false };

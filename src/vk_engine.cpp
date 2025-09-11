@@ -802,6 +802,11 @@ void VulkanEngine::init() {
     init_imgui();
     init_default_data();
 
+    mainCamera.velocity = glm::vec3(0.f);
+    mainCamera.position = glm::vec3(0, 0, 5);
+    mainCamera.pitch = 0;
+    mainCamera.yaw = 0;
+
     // everything went fine
     _isInitialized = true;
 }
@@ -853,7 +858,8 @@ void VulkanEngine::update_scene() {
         loadedNodes["Cube"]->Draw(translation * scale, mainDrawContext);
     }
 
-    sceneData.view = glm::translate(glm::vec3{ 0, 0, -5 });
+    mainCamera.update();
+    sceneData.view = mainCamera.getViewMatrix();
     sceneData.proj = glm::perspective(glm::radians(70.f), (float)_windowExtent.width / (float)_windowExtent.height, 10000.f, 0.1f);
     sceneData.proj[1][1] *= -1;
     sceneData.viewproj = sceneData.proj * sceneData.view;
@@ -1016,6 +1022,7 @@ void VulkanEngine::run() {
                     stop_rendering = false;
                 }
             }
+            mainCamera.processSDLEvent(e);
             ImGui_ImplSDL2_ProcessEvent(&e); // send event to imgui
         }
 
