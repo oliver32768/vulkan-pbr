@@ -57,8 +57,11 @@ struct RenderObject {
 	VkDeviceAddress vertexBufferAddress;
 };
 
+// render 'passes' (not the vulkan ones)
+// change drawgeometry respectively!
 struct DrawContext {
 	std::vector<RenderObject> OpaqueSurfaces;
+	std::vector<RenderObject> TransparentSurfaces;
 };
 
 struct ComputePushConstants {
@@ -228,6 +231,7 @@ public:
 	void update_scene();
 
 	AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
+	void destroy_buffer(const AllocatedBuffer& buffer);
 private:
 	void init_vulkan();
 	void init_swapchain();
@@ -246,6 +250,4 @@ private:
 
 	void init_imgui();
 	void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
-
-	void destroy_buffer(const AllocatedBuffer& buffer);
 };
