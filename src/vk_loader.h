@@ -14,10 +14,17 @@ struct GLTFMaterial {
 	MaterialInstance data;
 };
 
+struct Bounds { // oriented bounding box for frustum culling
+    glm::vec3 origin;
+    float sphereRadius;
+    glm::vec3 extents;
+};
+
 struct GeoSurface {
 	uint32_t startIndex; // indexed draw offset
 	uint32_t count;
 	std::shared_ptr<GLTFMaterial> material;
+    Bounds bounds;
 };
 
 struct MeshAsset {
