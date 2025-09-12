@@ -22,7 +22,11 @@
 #include <chrono>
 #include <thread>
 
+#ifdef _DEBUG
 constexpr bool bUseValidationLayers = true;
+#else
+constexpr bool bUseValidationLayers = false;
+#endif
 
 VulkanEngine* loadedEngine = nullptr;
 
