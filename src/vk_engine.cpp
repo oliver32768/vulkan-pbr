@@ -115,7 +115,6 @@ AllocatedImage VulkanEngine::create_image(void* data, VkExtent3D size, VkFormat 
     return new_image;
 }
 
-
 // no actual data, just allocates
 AllocatedImage VulkanEngine::create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped) {
     AllocatedImage newImage;
@@ -852,11 +851,9 @@ void VulkanEngine::init() {
     mainCamera.pitch = 0;
     mainCamera.yaw = 0;
 
-    std::string structurePath = { "..\\..\\assets\\structure.glb" };
+    std::string structurePath = { "..\\..\\assets\\DamagedHelmet.glb" };
     auto structureFile = loadGltf(this, structurePath);
-
     assert(structureFile.has_value());
-
     loadedScenes["structure"] = *structureFile;
 
     // everything went fine

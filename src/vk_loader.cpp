@@ -20,10 +20,7 @@ void LoadedGLTF::Draw(const glm::mat4& topMatrix, DrawContext& ctx) {
 // or add it into the per-frame deletion queue and defer it.
 void LoadedGLTF::clearAll() {
     VkDevice dv = creator->_device;
-
-    descriptorPool.destroy_pools(dv);
-
-    creator->destroy_buffer(materialDataBuffer);
+    
     for (auto& [k, v] : meshes) {
         creator->destroy_buffer(v->meshBuffers.indexBuffer);
         creator->destroy_buffer(v->meshBuffers.vertexBuffer);
@@ -40,6 +37,9 @@ void LoadedGLTF::clearAll() {
     for (auto& sampler : samplers) {
         vkDestroySampler(dv, sampler, nullptr);
     }
+
+    descriptorPool.destroy_pools(dv);
+    creator->destroy_buffer(materialDataBuffer);
 }
 
 std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& asset, fastgltf::Image& image) {
@@ -111,7 +111,7 @@ std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& 
 }
 
 std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::string_view filePath) {
-    fmt::print("Loading GLTF: {}", filePath);
+    fmt::println("Loading GLTF: {}", filePath);
 
     std::shared_ptr<LoadedGLTF> scene = std::make_shared<LoadedGLTF>();
     scene->creator = engine;
@@ -196,12 +196,14 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
     // Textures > Materials > Meshes > MeshNodes
 
     // load all textures
+    int img_idx = 0;
     for (fastgltf::Image& image : gltf.images) {
         std::optional<AllocatedImage> img = load_image(engine, gltf, image);
 
         if (img.has_value()) {
             images.push_back(*img);
-            file.images[image.name.c_str()] = *img;
+            fmt::println("Inserting into file.images[{}]", std::to_string(img_idx));
+            file.images[std::to_string(img_idx)] = *img;
         }
         else {
             // we failed to load, so lets give the slot a default white texture to not
@@ -209,20 +211,20 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
             images.push_back(engine->_errorCheckerboardImage);
             std::cout << "gltf failed to load texture " << image.name << std::endl;
         }
+        img_idx++;
     }
 
 
     // allocate buffer for material data with VMA
-    file.materialDataBuffer = engine->create_buffer(sizeof(GLTFMetallic_Roughness::MaterialConstants) * gltf.materials.size(),
-        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    int data_index = 0; // this will be incremented for each material loaded
+    file.materialDataBuffer = engine->create_buffer(sizeof(GLTFMetallic_Roughness::MaterialConstants) * gltf.materials.size(), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
     // pointer to buffer we just allocated. Used for writes below
     GLTFMetallic_Roughness::MaterialConstants* sceneMaterialConstants = (GLTFMetallic_Roughness::MaterialConstants*)file.materialDataBuffer.info.pMappedData;
-
+    int mat_idx = 0;
     for (fastgltf::Material& mat : gltf.materials) {
         std::shared_ptr<GLTFMaterial> newMat = std::make_shared<GLTFMaterial>();
         materials.push_back(newMat);
-        file.materials[mat.name.c_str()] = newMat;
+        fmt::println("Inserting into file.materials[{}]", std::to_string(mat_idx));
+        file.materials[std::to_string(mat_idx)] = newMat;
 
         GLTFMetallic_Roughness::MaterialConstants constants;
         constants.colorFactors.x = mat.pbrData.baseColorFactor[0];
@@ -233,7 +235,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         constants.metal_rough_factors.x = mat.pbrData.metallicFactor;
         constants.metal_rough_factors.y = mat.pbrData.roughnessFactor;
         // write material parameters to buffer
-        sceneMaterialConstants[data_index] = constants;
+        sceneMaterialConstants[mat_idx] = constants;
 
         // determine if it's opaque or transparent based on material blending type
         MaterialPass passType = MaterialPass::MainColor;
@@ -250,7 +252,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
         // set the uniform buffer for the material data
         materialResources.dataBuffer = file.materialDataBuffer.buffer;
-        materialResources.dataBufferOffset = data_index * sizeof(GLTFMetallic_Roughness::MaterialConstants);
+        materialResources.dataBufferOffset = mat_idx * sizeof(GLTFMetallic_Roughness::MaterialConstants);
         // grab textures from gltf file
         if (mat.pbrData.baseColorTexture.has_value()) {
             // .value() just returns the value of a std::optional<T> if it exists, otherwise throws exception
@@ -266,17 +268,19 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         // write descriptors
         newMat->data = engine->metalRoughMaterial.write_material(engine->_device, passType, materialResources, file.descriptorPool);
 
-        data_index++;
+        mat_idx++;
     }
 
     // use the same vectors for all meshes so that the memory doesnt reallocate as often
     std::vector<uint32_t> indices;
     std::vector<Vertex> vertices;
 
+    int mesh_idx = 0;
     for (fastgltf::Mesh& mesh : gltf.meshes) {
         std::shared_ptr<MeshAsset> newmesh = std::make_shared<MeshAsset>();
         meshes.push_back(newmesh);
-        file.meshes[mesh.name.c_str()] = newmesh;
+        fmt::println("Inserting into file.images[{}]", std::to_string(mesh_idx));
+        file.meshes[std::to_string(mesh_idx)] = newmesh;
         newmesh->name = mesh.name;
 
         // clear the mesh arrays each mesh, we dont want to merge them by error
@@ -371,9 +375,12 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         }
 
         newmesh->meshBuffers = engine->uploadMesh(indices, vertices);
+
+        mesh_idx++;
     }
 
     // load all nodes and their meshes
+    int node_idx = 0;
     for (fastgltf::Node& node : gltf.nodes) {
         std::shared_ptr<Node> newNode;
 
@@ -387,7 +394,8 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         }
 
         nodes.push_back(newNode);
-        file.nodes[node.name.c_str()];
+        fmt::println("Inserting into file.nodes[{}]", std::to_string(node_idx));
+        file.nodes[std::to_string(node_idx)];
 
         // If node.transform holds a TransformMatrix, the first lambda runs
         // If it holds a TRS, the second lambda runs
@@ -405,6 +413,8 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
                 newNode->localTransform = tm * rm * sm; // otherwise construct it from the TRS
             } 
         }, node.transform); // .transform is a variant, between either a matrix or a TRS
+
+        node_idx++;
     }
 
     // Nodes loaded, now construct hierarchy to create scene graph
