@@ -76,17 +76,15 @@ void VulkanEngine::destroy_image(const AllocatedImage& img) {
 }
 
 // takes ptr to img data and actually copies to via temporal staging buffer / immediate submit
-AllocatedImage VulkanEngine::create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped) {
+AllocatedImage VulkanEngine::create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped)
+{
     size_t data_size = size.depth * size.width * size.height * 4;
     AllocatedBuffer uploadbuffer = create_buffer(data_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 
-    // copy img data into host visible temporal buffer
     memcpy(uploadbuffer.info.pMappedData, data, data_size);
 
-    // use the other overload for just allocating img on gpu and setting up img view etc.
     AllocatedImage new_image = create_image(size, format, usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, mipmapped);
 
-    // now actually copy from temporal buffer to gpu-only memory
     immediate_submit([&](VkCommandBuffer cmd) {
         vkutil::transition_image(cmd, new_image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
@@ -105,15 +103,18 @@ AllocatedImage VulkanEngine::create_image(void* data, VkExtent3D size, VkFormat 
         vkCmdCopyBufferToImage(cmd, uploadbuffer.buffer, new_image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
             &copyRegion);
 
-        vkutil::transition_image(cmd, new_image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    });
-
-    // dont need it anymore
+        if (mipmapped) {
+            vkutil::generate_mipmaps(cmd, new_image.image, VkExtent2D{ new_image.imageExtent.width,new_image.imageExtent.height });
+        }
+        else {
+            vkutil::transition_image(cmd, new_image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+        });
     destroy_buffer(uploadbuffer);
-
     return new_image;
 }
+
 
 // no actual data, just allocates
 AllocatedImage VulkanEngine::create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped) {
