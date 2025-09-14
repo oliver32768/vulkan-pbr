@@ -11,28 +11,9 @@ layout (location = 3) in vec3 vVertexColor;
 layout (location = 0) out vec4 outFragColor;
 
 const float PI = 3.14159265359;
+#define MEDIUMP_FLT_MAX 65504.0
+#define saturateMediump(x) min(x, MEDIUMP_FLT_MAX)
 
-vec3 fresnelSchlick(float cosTheta, vec3 F0) {
-    return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
-}
-
-// NDF: GGX (Trowbridge-Reitz), Isotropic
-// G(h) = a^2 / (pi * ((n.h)^2 * (a^2 - 1) + 1)^2
-float distributionGGX(float NdotH, float alpha) {
-    float a2 = alpha * alpha;
-    float d = (NdotH * NdotH) * (a2 - 1.0) + 1.0;
-    return a2 / (PI * d * d);
-}
-
-float geometrySchlickGGX(float NdotX, float k) {
-    return NdotX / (NdotX * (1.0 - k) + k);
-}
-
-float geometrySmith(float NdotV, float NdotL, float k) {
-    return geometrySchlickGGX(NdotV, k) * geometrySchlickGGX(NdotL, k);
-}
-
-// build TBN from screen-space derivatives (no tangents in mesh needed)
 mat3 buildTBN(vec3 N, vec3 pos, vec2 uv) {
     vec3 dp1 = dFdx(pos);
     vec3 dp2 = dFdy(pos);
@@ -48,67 +29,87 @@ mat3 buildTBN(vec3 N, vec3 pos, vec2 uv) {
     return mat3(T, B, N);
 }
 
+// F
+vec3 F_Schlick(float u, vec3 f0) {
+    return f0 + (vec3(1.0) - f0) * pow(1.0 - u, 5.0);
+}
+
+// D
+float D_GGX(float NoH, float a) {
+    float a2 = a * a;
+    float f = (NoH * a2 - NoH) * NoH + 1.0;
+    return a2 / (PI * f * f);
+}
+
+// G
+float V_SmithGGXCorrelated(float NoV, float NoL, float a) {
+    float a2 = a * a;
+    float GGXL = NoV * sqrt((-NoL * a2 + NoL) * NoL + a2);
+    float GGXV = NoL * sqrt((-NoV * a2 + NoV) * NoV + a2);
+    return 0.5 / (GGXV + GGXL);
+}
+
+vec3 toLinear(vec3 srgb) {
+    return pow(srgb, vec3(2.2));
+}
+
 void main() {
-    // camera position from inverse(view)
     vec3 camPos = inverse(sceneData.view)[3].xyz;
 
-    // base inputs
-    vec4 baseSample = texture(colorTex, vUV); // todo: srgb
+    vec4 baseSample = texture(colorTex, vUV);
     vec3 baseColor = baseSample.rgb * materialData.colorFactors.rgb * vVertexColor;
     float alphaOut = baseSample.a * materialData.colorFactors.a;
 
-    // metallic & roughness. Roughness = G, Metalness = B
+    // Roughness = G, Metalness = B
     vec2 mrTex = texture(metalRoughTex, vUV).gb; 
     float roughness = clamp(mrTex.x * materialData.metal_rough_factors.y, 0.04, 1.0);
     float metallic = clamp(mrTex.y * materialData.metal_rough_factors.x, 0.0, 1.0);
-    float alpha = roughness * roughness; // perceptual to microfacet alpha
 
-    // normal mapping
     vec3 N = normalize(vWorldNormal);
     vec3 nm = texture(normalTex, vUV).xyz * 2.0 - 1.0; // assume linear texture, default (0.5,0.5,1)
     mat3 TBN = buildTBN(N, vWorldPos, vUV);
     N = normalize(TBN * nm);
 
-    // AO
-    float ao = texture(AOTex, vUV).r; // default white => 1.0
+    float ao = texture(AOTex, vUV).r;
 
-    // emissive
-    vec3 emissive = texture(emissiveTex, vUV).rgb; // expect sRGB view
-    // todo: multiply by emissive factor, strength, etc.
+    vec3 emissive = texture(emissiveTex, vUV).rgb; 
 
-    // lighting vectors (world space)
-    vec3 V = normalize(camPos - vWorldPos);
-    vec3 L = normalize(sceneData.sunlightDirection.xyz); // assume this is the *incoming* dir
+    vec3 V = normalize(camPos - vWorldPos); // towards camera
+    vec3 L = normalize(sceneData.sunlightDirection.xyz); 
     vec3 H = normalize(V + L);
 
-    float NdotL = clamp(dot(N, L), 0.0, 1.0);
-    float NdotV = clamp(dot(N, V), 0.0, 1.0);
-    float NdotH = clamp(dot(N, H), 0.0, 1.0);
+    float NoV = abs(dot(N, V)) + 1e-5;
+    float NoL = clamp(dot(N, L), 0.0, 1.0); // cos(theta_i)
+    float NoH = clamp(dot(N, H), 0.0, 1.0);
+    float LoH = clamp(dot(L, H), 0.0, 1.0);
+    float VoH = clamp(dot(V, H), 0.0, 1.0);
 
-    // Fresnel reflectance at normal incidence
-    vec3  F0 = mix(vec3(0.04), baseColor, metallic);
-    vec3  F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-    float D = distributionGGX(NdotH, alpha);
-    float k = (roughness + 1.0);
-    k = (k * k) / 8.0; // Schlick-GGX remap
-    float G = geometrySmith(NdotV, NdotL, k);
+    // perceptually linear roughness to roughness (see parameterization)
+    float alpha = roughness * roughness;
 
-    vec3 specular = (D * G) * F / max(4.0 * NdotV * NdotL, 1e-4);
+    vec3 F0 = mix(vec3(0.04), baseColor, metallic);
 
-    // Lambertian diffuse (metallic scales it down)
-    vec3 kd = (1.0 - F) * (1.0 - metallic);
-    vec3 diffuse = kd * baseColor / PI;
+    // Specular
+    float D = D_GGX(NoH, alpha);
+    vec3 F = F_Schlick(VoH, F0);
+    float G = V_SmithGGXCorrelated(NoV, NoL, alpha);
+
+    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+
+    vec3 Fr = (D * G * F); // 1.0 / max(4.0 * NoV * NoL, 1e-4) is already part of the G we calculate
+    vec3 Fd = kD * baseColor / PI;
 
     // directional light color & intensity
-    vec3  sunColor = sceneData.sunlightColor.rgb;
-    float sunI = sceneData.sunlightColor.w; // intensity in .w 
+    vec3 L_i = sceneData.sunlightColor.rgb * sceneData.sunlightColor.w;
+    float cos_i = NoL;
 
-    vec3 direct = (diffuse + specular) * sunColor * sunI * NdotL;
+    // TODO: I think this linear separation is what devsh says is wrong
+    // f_r = F(H,L) * G(H,L,V) * D(H) / (4 * dot(V,N) * dot(L,N)) + (1 - F(N,L)) * (1 - F(N,V)) * (baseColor / PI)
+    vec3 direct = (Fd + Fr) * L_i * cos_i;
 
-    // ambient (todo: IBL)
-    vec3 ambient = sceneData.ambientColor.rgb * baseColor * ao;
+    //vec3 ambient = sceneData.ambientColor.rgb * baseColor * ao;
 
-    vec3 color = direct + ambient + emissive;
+    vec3 color = direct + emissive;
 
     outFragColor = vec4(color, alphaOut);
 }
