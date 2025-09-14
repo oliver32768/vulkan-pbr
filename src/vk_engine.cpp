@@ -940,7 +940,8 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     // and then our opaque_draws would be something like 20 bits draw index, and 44 bits for sort key/hash.
     // That way would be faster than this as it can be sorted through faster methods"
 
-    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(_drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); // begin a render pass connected to our draw image
+    VkClearValue clearValue = { 0.0, 0.0, 0.0, 0.0 };
+    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(_drawImage.imageView, &clearValue, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); // begin a render pass connected to our draw image
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(_depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
     VkRenderingInfo renderInfo = vkinit::rendering_info(_drawExtent, &colorAttachment, &depthAttachment);
@@ -1079,10 +1080,7 @@ void VulkanEngine::draw() {
 
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
 
-    vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL); // comp shader draws into general layout
-    draw_background(cmd); // This no longer draws to the swapchain image directly
-
-    vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); // gfx pipeline draws into color optimal layout
+    vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); // gfx pipeline draws into color optimal layout
     vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
     draw_geometry(cmd);
 
@@ -1169,22 +1167,6 @@ void VulkanEngine::run() {
         ImGui_ImplSDL2_NewFrame();
 
         ImGui::NewFrame();
-
-        if (ImGui::Begin("background")) {
-            ImGui::SliderFloat("Render Scale", &renderScale, 0.3f, 1.f);
-
-            ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
-
-            ImGui::Text("Selected effect: ", selected.name);
-
-            ImGui::SliderInt("Effect Index", &currentBackgroundEffect, 0, backgroundEffects.size() - 1);
-
-            ImGui::InputFloat4("data1", (float*)&selected.data.data1);
-            ImGui::InputFloat4("data2", (float*)&selected.data.data2);
-            ImGui::InputFloat4("data3", (float*)&selected.data.data3);
-            ImGui::InputFloat4("data4", (float*)&selected.data.data4);
-        }
-        ImGui::End();
 
         ImGui::Begin("Stats");
         ImGui::Text("frametime %f ms", stats.frametime);
