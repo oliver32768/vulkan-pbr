@@ -34,8 +34,10 @@ struct GLTFMetallic_Roughness {
 	struct MaterialResources {
 		AllocatedImage colorImage; // albedo?
 		VkSampler colorSampler;
+
 		AllocatedImage metalRoughImage; // metallic / roughness (duh)
 		VkSampler metalRoughSampler;
+
 		VkBuffer dataBuffer; // material constants 
 		uint32_t dataBufferOffset;
 	};
@@ -60,9 +62,11 @@ struct RenderObject {
 	VkBuffer indexBuffer;
 
 	MaterialInstance* material;
-	Bounds bounds;
+	
 	glm::mat4 transform;
 	VkDeviceAddress vertexBufferAddress;
+
+	Bounds bounds;
 };
 
 // render 'passes' (not the vulkan ones)

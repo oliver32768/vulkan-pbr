@@ -165,10 +165,13 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 } 
     };
+    fmt::println("gltf.materials.size() = {}", gltf.materials.size());
     file.descriptorPool.init(engine->_device, gltf.materials.size(), sizes);
 
     // load samplers
+    int sampler_idx = 0;
     for (fastgltf::Sampler& sampler : gltf.samplers) {
+        fmt::println("Loading sampler {}", sampler_idx);
         VkSamplerCreateInfo sampl = { 
             .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, 
             .pNext = nullptr 
@@ -185,6 +188,8 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         vkCreateSampler(engine->_device, &sampl, nullptr, &newSampler);
 
         file.samplers.push_back(newSampler);
+
+        sampler_idx++;
     }
 
     // temporal arrays for all the objects to use while creating the GLTF data
@@ -213,7 +218,6 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         }
         img_idx++;
     }
-
 
     // allocate buffer for material data with VMA
     file.materialDataBuffer = engine->create_buffer(sizeof(GLTFMetallic_Roughness::MaterialConstants) * gltf.materials.size(), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -279,7 +283,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
     for (fastgltf::Mesh& mesh : gltf.meshes) {
         std::shared_ptr<MeshAsset> newmesh = std::make_shared<MeshAsset>();
         meshes.push_back(newmesh);
-        fmt::println("Inserting into file.images[{}]", std::to_string(mesh_idx));
+        fmt::println("Inserting into file.meshes[{}]", std::to_string(mesh_idx));
         file.meshes[std::to_string(mesh_idx)] = newmesh;
         newmesh->name = mesh.name;
 
