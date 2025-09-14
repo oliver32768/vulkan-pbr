@@ -42,7 +42,7 @@ void LoadedGLTF::clearAll() {
     creator->destroy_buffer(materialDataBuffer);
 }
 
-std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& asset, fastgltf::Image& image) {
+std::optional<AllocatedImage> load_image(VulkanEngine* engine, VkFormat format, fastgltf::Asset& asset, fastgltf::Image& image) {
     AllocatedImage newImage{};
 
     int width, height, nrChannels;
@@ -60,7 +60,7 @@ std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& 
                     imagesize.width = width;
                     imagesize.height = height;
                     imagesize.depth = 1;
-                    newImage = engine->create_image(data, imagesize, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, true);
+                    newImage = engine->create_image(data, imagesize, format, VK_IMAGE_USAGE_SAMPLED_BIT, true);
                     stbi_image_free(data);
                 }
             },
@@ -72,7 +72,7 @@ std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& 
                     imagesize.width = width;
                     imagesize.height = height;
                     imagesize.depth = 1;
-                    newImage = engine->create_image(data, imagesize, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, true);
+                    newImage = engine->create_image(data, imagesize, format, VK_IMAGE_USAGE_SAMPLED_BIT, true);
                     stbi_image_free(data);
                 }
             },
@@ -92,7 +92,7 @@ std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& 
                             imagesize.width = width;
                             imagesize.height = height;
                             imagesize.depth = 1;
-                            newImage = engine->create_image(data, imagesize, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, true);
+                            newImage = engine->create_image(data, imagesize, format, VK_IMAGE_USAGE_SAMPLED_BIT, true);
                             stbi_image_free(data);
                         }
                     } 
@@ -108,6 +108,14 @@ std::optional<AllocatedImage> load_image(VulkanEngine* engine, fastgltf::Asset& 
     else {
         return newImage;
     }
+}
+
+ImageUse operator|(ImageUse a, ImageUse b) {
+    return ImageUse(uint32_t(a) | uint32_t(b));
+}
+
+ImageUse& operator|=(ImageUse& a, ImageUse b) {
+    a = a | b; return a;
 }
 
 std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::string_view filePath) {
@@ -161,7 +169,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
     // Create descriptor pool mgr, use gltf to estimate number of initial sets
     std::vector<DescriptorAllocatorGrowable::PoolSizeRatio> sizes = { 
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5 },
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 } 
     };
@@ -178,10 +186,8 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         };
         sampl.maxLod = VK_LOD_CLAMP_NONE;
         sampl.minLod = 0;
-
         sampl.magFilter = extract_filter(sampler.magFilter.value_or(fastgltf::Filter::Nearest));
         sampl.minFilter = extract_filter(sampler.minFilter.value_or(fastgltf::Filter::Nearest));
-
         sampl.mipmapMode = extract_mipmap_mode(sampler.minFilter.value_or(fastgltf::Filter::Nearest));
 
         VkSampler newSampler;
@@ -200,10 +206,45 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
     // Textures > Materials > Meshes > MeshNodes
 
+    std::vector<ImageUse> usage(gltf.images.size(), ImageUse::None);
+
+    // helper: tag by texture index -> image index
+    auto tag_by_tex_index = [&](size_t texIndex, ImageUse u) {
+        if (texIndex >= gltf.textures.size()) return;
+        const auto& tex = gltf.textures[texIndex];
+        if (!tex.imageIndex) return; // skip if no image (e.g., invalid)
+        size_t img = tex.imageIndex.value();
+        if (img >= usage.size()) return;
+        usage[img] |= u;
+    };
+
+    // generic helper: works for std::optional<fastgltf::TextureInfo>,
+    // std::optional<fastgltf::NormalTextureInfo>, std::optional<fastgltf::OcclusionTextureInfo>, etc.
+    auto tag_tex = [&](const auto& optTexInfo, ImageUse u) {
+        if (!optTexInfo.has_value()) return;
+        tag_by_tex_index(optTexInfo->textureIndex, u);
+    };
+
+    // pass 1: tag usage
+    for (auto& mat : gltf.materials) {
+        tag_tex(mat.pbrData.baseColorTexture, ImageUse::BaseColor);
+        tag_tex(mat.pbrData.metallicRoughnessTexture, ImageUse::MetalRough);
+        tag_tex(mat.normalTexture, ImageUse::Normal); // NormalTextureInfo
+        tag_tex(mat.occlusionTexture, ImageUse::AO); // OcclusionTextureInfo
+        tag_tex(mat.emissiveTexture, ImageUse::Emissive);
+    }
+
+    // choose format
+    auto chooseFormat = [&](ImageUse u) -> VkFormat {
+        bool wantsSRGB = (uint32_t(u) & (ImageUse::BaseColor | ImageUse::Emissive)) != 0;
+        return wantsSRGB ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    };
+
     // load all textures
-    int img_idx = 0;
-    for (fastgltf::Image& image : gltf.images) {
-        std::optional<AllocatedImage> img = load_image(engine, gltf, image);
+    for (size_t img_idx = 0; img_idx < gltf.images.size(); ++img_idx) {
+        fastgltf::Image& image = gltf.images[img_idx];
+        VkFormat fmt = chooseFormat(usage[img_idx]);
+        std::optional<AllocatedImage> img = load_image(engine, fmt, gltf, image); // add param
 
         if (img.has_value()) {
             images.push_back(*img);
@@ -216,7 +257,6 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
             images.push_back(engine->_errorCheckerboardImage);
             std::cout << "gltf failed to load texture " << image.name << std::endl;
         }
-        img_idx++;
     }
 
     // allocate buffer for material data with VMA
@@ -248,27 +288,73 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         }
 
         GLTFMetallic_Roughness::MaterialResources materialResources;
-        // placeholder
+
+        // fallbacks
         materialResources.colorImage = engine->_whiteImage;
         materialResources.colorSampler = engine->_defaultSamplerLinear;
         materialResources.metalRoughImage = engine->_whiteImage;
         materialResources.metalRoughSampler = engine->_defaultSamplerLinear;
+        materialResources.normalImage = engine->_whiteImage;
+        materialResources.normalSampler = engine->_defaultSamplerLinear;
+        materialResources.occlusionImage = engine->_whiteImage;
+        materialResources.occlusionSampler = engine->_defaultSamplerLinear;
+        materialResources.emissiveImage = engine->_blackImage;
+        materialResources.emissiveSampler = engine->_defaultSamplerLinear;
 
         // set the uniform buffer for the material data
         materialResources.dataBuffer = file.materialDataBuffer.buffer;
         materialResources.dataBufferOffset = mat_idx * sizeof(GLTFMetallic_Roughness::MaterialConstants);
-        // grab textures from gltf file
-        if (mat.pbrData.baseColorTexture.has_value()) {
-            // .value() just returns the value of a std::optional<T> if it exists, otherwise throws exception
-            // texture = { img, sampler }
-            // these lines just retrieve those from a texture
-            size_t img = gltf.textures[mat.pbrData.baseColorTexture.value().textureIndex].imageIndex.value();
-            size_t sampler = gltf.textures[mat.pbrData.baseColorTexture.value().textureIndex].samplerIndex.value();
 
-            // and then store it in our material struct
+        // base color
+        if (mat.pbrData.baseColorTexture.has_value()) {
+            fmt::println("Loading base color texture");
+            size_t texIndex = mat.pbrData.baseColorTexture.value().textureIndex;
+            size_t img = gltf.textures[texIndex].imageIndex.value();
+            size_t sampler = gltf.textures[texIndex].samplerIndex.value();
             materialResources.colorImage = images[img];
             materialResources.colorSampler = file.samplers[sampler];
         }
+
+        // metalness + roughness
+        if (mat.pbrData.metallicRoughnessTexture.has_value()) {
+            fmt::println("Loading metal+roughness texture");
+            size_t texIndex = mat.pbrData.metallicRoughnessTexture.value().textureIndex;
+            size_t img = gltf.textures[texIndex].imageIndex.value();
+            size_t sampler = gltf.textures[texIndex].samplerIndex.value();
+            materialResources.metalRoughImage = images[img];
+            materialResources.metalRoughSampler = file.samplers[sampler];
+        }
+
+        // normal
+        if (mat.normalTexture.has_value()) {
+            fmt::println("Loading normal texture");
+            size_t texIndex = mat.normalTexture.value().textureIndex;
+            size_t img = gltf.textures[texIndex].imageIndex.value();
+            size_t sampler = gltf.textures[texIndex].samplerIndex.value();
+            materialResources.normalImage = images[img];
+            materialResources.normalSampler = file.samplers[sampler];
+        }
+
+        // occlusion
+        if (mat.occlusionTexture.has_value()) {
+            fmt::println("Loading AO texture");
+            size_t texIndex = mat.occlusionTexture.value().textureIndex;
+            size_t img = gltf.textures[texIndex].imageIndex.value();
+            size_t sampler = gltf.textures[texIndex].samplerIndex.value();
+            materialResources.occlusionImage = images[img];
+            materialResources.occlusionSampler = file.samplers[sampler];
+        }
+
+        // emissive
+        if (mat.emissiveTexture.has_value()) {
+            fmt::println("Loading emissive texture");
+            size_t texIndex = mat.emissiveTexture.value().textureIndex;
+            size_t img = gltf.textures[texIndex].imageIndex.value();
+            size_t sampler = gltf.textures[texIndex].samplerIndex.value();
+            materialResources.emissiveImage = images[img];
+            materialResources.emissiveSampler = file.samplers[sampler];
+        }
+
         // write descriptors
         newMat->data = engine->metalRoughMaterial.write_material(engine->_device, passType, materialResources, file.descriptorPool);
 

@@ -5,7 +5,7 @@
 
 void Camera::update(double deltaTime) {
     glm::mat4 cameraRotation = getRotationMatrix();
-    position += (float)deltaTime * glm::vec3(cameraRotation * glm::vec4(velocity * 0.025f, 0.f));
+    position += (float)deltaTime * glm::vec3(cameraRotation * glm::vec4(velocity * 0.005f, 0.f));
 }
 
 void Camera::processSDLEvent(SDL_Event& e) {

@@ -164,9 +164,6 @@ void VulkanEngine::resize_swapchain() {
 }
 
 void VulkanEngine::init_default_data() {
-    testMeshes = loadGltfMeshes(this, "..\\..\\assets\\basicmesh.glb").value();
-
-    //3 default textures, white, grey, black. 1 pixel each
     uint32_t white = glm::packUnorm4x8(glm::vec4(1, 1, 1, 1));
     _whiteImage = create_image((void*)&white, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_SAMPLED_BIT);
@@ -179,7 +176,6 @@ void VulkanEngine::init_default_data() {
     _blackImage = create_image((void*)&black, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_SAMPLED_BIT);
 
-    //checkerboard image
     uint32_t magenta = glm::packUnorm4x8(glm::vec4(1, 0, 1, 1));
     std::array<uint32_t, 16 * 16 > pixels; //for 16x16 checkerboard texture
     for (int x = 0; x < 16; x++) {
@@ -192,11 +188,9 @@ void VulkanEngine::init_default_data() {
 
     // Samplers
     VkSamplerCreateInfo sampl = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-
     sampl.magFilter = VK_FILTER_NEAREST;
     sampl.minFilter = VK_FILTER_NEAREST;
     vkCreateSampler(_device, &sampl, nullptr, &_defaultSamplerNearest);
-
     sampl.magFilter = VK_FILTER_LINEAR;
     sampl.minFilter = VK_FILTER_LINEAR;
     vkCreateSampler(_device, &sampl, nullptr, &_defaultSamplerLinear);
@@ -207,6 +201,12 @@ void VulkanEngine::init_default_data() {
     materialResources.colorSampler = _defaultSamplerLinear;
     materialResources.metalRoughImage = _whiteImage;
     materialResources.metalRoughSampler = _defaultSamplerLinear;
+    materialResources.normalImage = _whiteImage;
+    materialResources.normalSampler = _defaultSamplerLinear;
+    materialResources.occlusionImage = _whiteImage;
+    materialResources.occlusionSampler = _defaultSamplerLinear;
+    materialResources.emissiveImage = _blackImage;
+    materialResources.emissiveSampler = _defaultSamplerLinear;
 
     // ubo
     AllocatedBuffer materialConstants = create_buffer(sizeof(GLTFMetallic_Roughness::MaterialConstants), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -214,7 +214,7 @@ void VulkanEngine::init_default_data() {
     // write
     GLTFMetallic_Roughness::MaterialConstants* sceneUniformData = (GLTFMetallic_Roughness::MaterialConstants*)materialConstants.allocation->GetMappedData();
     sceneUniformData->colorFactors = glm::vec4{ 1,1,1,1 };
-    sceneUniformData->metal_rough_factors = glm::vec4{ 1,0.5,0,0 };
+    sceneUniformData->metal_rough_factors = glm::vec4{ 1, 0.5, 0, 0 };
 
     _mainDeletionQueue.push_function([=, this]() {
         destroy_buffer(materialConstants);
@@ -224,17 +224,6 @@ void VulkanEngine::init_default_data() {
     materialResources.dataBufferOffset = 0;
 
     defaultData = metalRoughMaterial.write_material(_device, MaterialPass::MainColor, materialResources, globalDescriptorAllocator);
-
-    for (auto& m : testMeshes) { // iterate over loaded glTF submeshes
-        std::shared_ptr<MeshNode> newNode = std::make_shared<MeshNode>();
-        newNode->mesh = m;
-        newNode->localTransform = glm::mat4{ 1.f };
-        newNode->worldTransform = glm::mat4{ 1.f };
-        for (auto& s : newNode->mesh->surfaces) {
-            s.material = std::make_shared<GLTFMaterial>(defaultData); // just put this placeholder material on every surface for now
-        }
-        loadedNodes[m->name] = std::move(newNode);
-    }
 
     _mainDeletionQueue.push_function([&]() {
         vkDestroySampler(_device, _defaultSamplerNearest, nullptr);
@@ -1219,12 +1208,12 @@ void VulkanEngine::run() {
 
 void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine) {
     VkShaderModule meshFragShader;
-    if (!vkutil::load_shader_module("../../shaders/mesh.frag.spv", engine->_device, &meshFragShader)) {
+    if (!vkutil::load_shader_module("../../shaders/mesh_pbr.frag.spv", engine->_device, &meshFragShader)) {
         fmt::println("Error when building the triangle fragment shader module");
     }
 
     VkShaderModule meshVertexShader;
-    if (!vkutil::load_shader_module("../../shaders/mesh.vert.spv", engine->_device, &meshVertexShader)) {
+    if (!vkutil::load_shader_module("../../shaders/mesh_pbr.vert.spv", engine->_device, &meshVertexShader)) {
         fmt::println("Error when building the triangle vertex shader module");
     }
 
@@ -1234,15 +1223,17 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine) {
     matrixRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
     DescriptorLayoutBuilder layoutBuilder;
-    layoutBuilder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-    layoutBuilder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-    layoutBuilder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    layoutBuilder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER); // Material Constants UBO
+    layoutBuilder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // Base Color
+    layoutBuilder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // Metalness+Roughness
+    layoutBuilder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // Normal
+    layoutBuilder.add_binding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // AO
+    layoutBuilder.add_binding(5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // Emissive
 
     materialLayout = layoutBuilder.build(engine->_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
 
     // Using two descriptor set layouts now
-    VkDescriptorSetLayout layouts[] = { engine->_gpuSceneDataDescriptorLayout,
-        materialLayout };
+    VkDescriptorSetLayout layouts[] = { engine->_gpuSceneDataDescriptorLayout, materialLayout };
 
     VkPipelineLayoutCreateInfo mesh_layout_info = vkinit::pipeline_layout_create_info();
     mesh_layout_info.setLayoutCount = 2; // likewise
@@ -1311,9 +1302,22 @@ MaterialInstance GLTFMetallic_Roughness::write_material(VkDevice device, Materia
 
     // write material constants (ubo) and material maps (textures+samplers)
     writer.clear();
-    writer.write_buffer(0, resources.dataBuffer, sizeof(MaterialConstants), resources.dataBufferOffset, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-    writer.write_image(1, resources.colorImage.imageView, resources.colorSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-    writer.write_image(2, resources.metalRoughImage.imageView, resources.metalRoughSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    writer.write_buffer(0, resources.dataBuffer, sizeof(MaterialConstants), resources.dataBufferOffset, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER); // Material Constants
+    writer.write_image(1, resources.colorImage.imageView, resources.colorSampler, // base color
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    writer.write_image(2, resources.metalRoughImage.imageView, resources.metalRoughSampler, // metalness + roughness
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    writer.write_image(3, resources.normalImage.imageView, resources.normalSampler, // normal
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    writer.write_image(4, resources.occlusionImage.imageView, resources.occlusionSampler, // ao
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    writer.write_image(5, resources.emissiveImage.imageView, resources.emissiveSampler, // emissive
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
 
     writer.update_set(device, matData.materialSet);
 

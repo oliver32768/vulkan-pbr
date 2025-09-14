@@ -10,6 +10,15 @@
 #include <fastgltf/parser.hpp>
 #include <fastgltf/tools.hpp>
 
+enum ImageUse : uint32_t { 
+    None = 0, 
+    BaseColor = 1 << 0, 
+    Emissive = 1 << 1, 
+    Normal = 1 << 2, 
+    MetalRough = 1 << 3, 
+    AO = 1 << 4 
+};
+
 struct GLTFMaterial {
 	MaterialInstance data;
 };

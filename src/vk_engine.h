@@ -32,11 +32,20 @@ struct GLTFMetallic_Roughness {
 
 	// will be written/bound to descriptor
 	struct MaterialResources {
-		AllocatedImage colorImage; // albedo?
+		AllocatedImage colorImage;
 		VkSampler colorSampler;
 
-		AllocatedImage metalRoughImage; // metallic / roughness (duh)
+		AllocatedImage metalRoughImage;
 		VkSampler metalRoughSampler;
+
+		AllocatedImage normalImage;
+		VkSampler normalSampler;
+
+		AllocatedImage occlusionImage;
+		VkSampler occlusionSampler;
+
+		AllocatedImage emissiveImage;
+		VkSampler emissiveSampler;
 
 		VkBuffer dataBuffer; // material constants 
 		uint32_t dataBufferOffset;
