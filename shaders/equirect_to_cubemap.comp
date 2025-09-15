@@ -1,0 +1,46 @@
+// equirect_to_cubemap.comp
+#version 460
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding=0) uniform sampler2D uEquirect;
+layout(binding=1, rgba32f) writeonly uniform image2DArray uCubeOut;
+
+layout (push_constant) uniform PC { uint face; uint size; } pc;
+
+// map cube face + uv -> direction
+vec3 face_uv_to_dir(uint face, vec2 uv) {
+    // uv in [0,1] -> [-1,1]
+    uv = uv*2.0 - 1.0;
+    vec3 d;
+    if (face==0) d = normalize(vec3( 1.0,  -uv.y, -uv.x)); // +X
+    if (face==1) d = normalize(vec3(-1.0,  -uv.y,  uv.x)); // -X
+    if (face==2) d = normalize(vec3( uv.x,  1.0,   uv.y)); // +Y
+    if (face==3) d = normalize(vec3( uv.x, -1.0,  -uv.y)); // -Y
+    if (face==4) d = normalize(vec3( uv.x, -uv.y,  1.0)); // +Z
+    if (face==5) d = normalize(vec3(-uv.x, -uv.y, -1.0)); // -Z
+    return d;
+}
+
+// dir -> equirect uv
+vec2 dir_to_equirect(vec3 d) {
+    float phi = atan(d.z, d.x); // [-pi, pi]
+    float theta = acos(clamp(d.y, -1.0, 1.0)); // [0, pi]
+    float u = (phi + 3.14159265) / (2.0*3.14159265);
+    float v = theta / 3.14159265;
+    return vec2(u, v);
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    uint  face = gl_GlobalInvocationID.z;   // 0..5
+    uint  size = gl_NumWorkGroups.x * gl_WorkGroupSize.x; // or push as const if you prefer
+
+    if (gid.x >= int(size) || gid.y >= int(size)) return;
+
+    vec2 uv = (vec2(gid)+0.5)/float(size);
+    vec3 dir = face_uv_to_dir(face, uv);
+    vec2 eq = dir_to_equirect(dir);
+    vec3 c = texture(uEquirect, eq).rgb;
+
+    imageStore(uCubeOut, ivec3(gid, int(face)), vec4(c,1.0));
+}

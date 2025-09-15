@@ -685,3 +685,23 @@ std::optional<std::vector<std::shared_ptr<MeshAsset>>> loadGltfMeshes(VulkanEngi
 
     return meshes;
 }
+
+// IBL
+
+AllocatedImage create_equirect_image_from_hdr(VulkanEngine* engine, const char* path) {
+    int w, h, comp;
+    float* data = stbi_loadf(path, &w, &h, &comp, 4); // RGB32F
+    if (!data) {
+        fmt::println("Failed to load equirectangular image at {}", path);
+    }
+
+    VkExtent3D ext{ 
+        (uint32_t)w, 
+        (uint32_t)h, 
+        1 
+    };
+
+    // sampled by compute shader
+    return engine->create_image(data, ext, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, false);
+}
+

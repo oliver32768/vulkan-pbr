@@ -49,8 +49,8 @@ float V_SmithGGXCorrelated(float NoV, float NoL, float a) {
     return 0.5 / (GGXV + GGXL);
 }
 
-vec3 toLinear(vec3 srgb) {
-    return pow(srgb, vec3(2.2));
+vec3 reinhardTonemap(vec3 color) {
+    return color / (color + vec3(1.0));
 }
 
 void main() {

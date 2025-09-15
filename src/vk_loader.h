@@ -75,3 +75,4 @@ private:
 std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::string_view filePath);
 VkFilter extract_filter(fastgltf::Filter filter);
 VkSamplerMipmapMode extract_mipmap_mode(fastgltf::Filter filter);
+AllocatedImage create_equirect_image_from_hdr(VulkanEngine* engine, const char* path);

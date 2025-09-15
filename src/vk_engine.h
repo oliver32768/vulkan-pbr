@@ -143,12 +143,29 @@ struct FrameData {
 	DescriptorAllocatorGrowable _frameDescriptors;
 };
 
+struct IBLResources {
+	AllocatedImage equirect; // 2D HDR input
+	AllocatedImage cubemap; // cube-compatible, mipmapped
+	VkSampler linearClampSampler{};
+	VkDescriptorSetLayout iblSetLayout{};
+	VkDescriptorSet iblSet{}; // grow this later (irradiance, prefiltered, brdfLUT)
+	DescriptorAllocatorGrowable descriptorAllocator;
+
+	// compute pipeline pieces
+	VkDescriptorSetLayout convertSetLayout{};
+	VkPipelineLayout convertPipelineLayout{};
+	VkPipeline convertPipeline{};
+	VkDescriptorSet convertSet{};
+};
+
 class VulkanEngine {
 public:
 	Camera mainCamera;
 	double deltaTime;
 	EngineStats stats;
 	std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
+
+	IBLResources _ibl;
 
 	bool _isInitialized{ false };
 	int _frameNumber{ 0 };
@@ -232,6 +249,14 @@ public:
 	
 	void draw();
 	void run();
+
+	AllocatedImage create_cubemap_image(uint32_t size, VkFormat format, bool mipmapped);
+
+	void init_equirect_to_cubemap_pipeline();
+
+	AllocatedImage generate_cubemap_from_hdr(const char* hdrPath, uint32_t cubeSize, bool mipmapped);
+
+	void init_ibl_descriptor_set();
 
 	void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
 
