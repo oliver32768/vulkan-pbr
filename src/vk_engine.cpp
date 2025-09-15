@@ -557,10 +557,58 @@ void VulkanEngine::init_background_pipelines() {
     });
 }
 
+void VulkanEngine::init_skybox_pipeline() {
+    VkShaderModule skyboxFragShader;
+    if (!vkutil::load_shader_module("../../shaders/skybox.frag.spv", _device, &skyboxFragShader)) {
+        fmt::print("Error when building the fragment shader \n");
+    }
+    else {
+        fmt::print("Skybox fragment shader succesfully loaded \n");
+    }
+
+    VkShaderModule skyboxVertexShader;
+    if (!vkutil::load_shader_module("../../shaders/skybox.vert.spv", _device, &skyboxVertexShader)) {
+        fmt::print("Error when building the vertex shader \n");
+    }
+    else {
+        fmt::print("Skybox vertex shader succesfully loaded \n");
+    }
+
+    VkDescriptorSetLayout layouts[] = { _gpuSceneDataDescriptorLayout, _ibl.iblSetLayout };
+    VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
+    pipeline_layout_info.setLayoutCount = 2;
+    pipeline_layout_info.pSetLayouts = layouts;
+    pipeline_layout_info.pPushConstantRanges = nullptr;
+    pipeline_layout_info.pushConstantRangeCount = 0;
+    VK_CHECK(vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_skyboxPipelineLayout));
+
+    PipelineBuilder pipelineBuilder;
+    pipelineBuilder._pipelineLayout = _skyboxPipelineLayout; // use the triangle layout we created
+    pipelineBuilder.set_shaders(skyboxVertexShader, skyboxFragShader); // connecting the vertex and fragment shaders to the pipeline
+    pipelineBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST); // it will draw triangles
+    pipelineBuilder.set_polygon_mode(VK_POLYGON_MODE_FILL); // filled triangles
+    pipelineBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE); // no backface culling
+    pipelineBuilder.set_multisampling_none(); // no multisampling
+    pipelineBuilder.disable_blending(); // no blending
+    pipelineBuilder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL); // yes depth testing, but no depth writes
+    pipelineBuilder.set_color_attachment_format(_drawImage.imageFormat); // connect the image format we will draw into, from draw image
+    pipelineBuilder.set_depth_format(_depthImage.imageFormat);
+    _skyboxPipeline = pipelineBuilder.build_pipeline(_device); // finally build the pipeline
+
+    vkDestroyShaderModule(_device, skyboxFragShader, nullptr);
+    vkDestroyShaderModule(_device, skyboxVertexShader, nullptr);
+
+    _mainDeletionQueue.push_function([&]() {
+        vkDestroyPipelineLayout(_device, _skyboxPipelineLayout, nullptr);
+        vkDestroyPipeline(_device, _skyboxPipeline, nullptr);
+     });
+}
+
 void VulkanEngine::init_pipelines() {
     init_background_pipelines();
     init_mesh_pipeline();
     metalRoughMaterial.build_pipelines(this);
+    init_skybox_pipeline();
 }
 
 void VulkanEngine::init_descriptors() {
@@ -965,7 +1013,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     VkRenderingInfo renderInfo = vkinit::rendering_info(_drawExtent, &colorAttachment, &depthAttachment);
     vkCmdBeginRendering(cmd, &renderInfo);
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _meshPipeline);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _skyboxPipeline);
     VkViewport viewport = {}; // need to have some pipeline bound before specifying dynamic state. I don't think it matters which here?
     viewport.x = 0;
     viewport.y = 0;
@@ -992,6 +1040,16 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     get_current_frame()._deletionQueue.push_function([=, this]() {
         destroy_buffer(gpuSceneDataBuffer);
     });
+
+    {
+        VkDescriptorSet skyboxSets[] = {
+            globalDescriptor, 
+            _ibl.iblSet 
+        };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _skyboxPipelineLayout, 0, 2, skyboxSets, 0, nullptr);
+
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+    }
 
     // state tracking, used to avoid redundant re-bindings in consecutive calls to `draw` lambda
     MaterialPipeline* lastPipeline = nullptr;

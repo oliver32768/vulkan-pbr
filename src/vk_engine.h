@@ -166,6 +166,8 @@ public:
 	std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
 
 	IBLResources _ibl;
+	VkPipelineLayout _skyboxPipelineLayout;
+	VkPipeline _skyboxPipeline;
 
 	bool _isInitialized{ false };
 	int _frameNumber{ 0 };
@@ -293,6 +295,8 @@ private:
 
 	void init_pipelines();
 	void init_background_pipelines();
+
+	void init_skybox_pipeline();
 
 	void init_imgui();
 	void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
