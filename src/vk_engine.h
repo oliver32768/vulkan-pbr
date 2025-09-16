@@ -143,19 +143,34 @@ struct FrameData {
 	DescriptorAllocatorGrowable _frameDescriptors;
 };
 
+struct IrradiancePushConstants {
+	uint32_t size;
+	uint32_t sampleCount;
+};
+
 struct IBLResources {
-	AllocatedImage equirect; // 2D HDR input
-	AllocatedImage cubemap; // cube-compatible, mipmapped
-	VkSampler linearClampSampler{};
-	VkDescriptorSetLayout iblSetLayout{};
-	VkDescriptorSet iblSet{}; // grow this later (irradiance, prefiltered, brdfLUT)
 	DescriptorAllocatorGrowable descriptorAllocator;
 
-	// compute pipeline pieces
+	AllocatedImage equirect; // 2D HDR input
+	AllocatedImage cubemap; // cube-compatible, mipmapped
+	AllocatedImage irradiancemap;
+	VkSampler linearClampSampler{};
+
+	// Graphics pipeline
+	VkDescriptorSetLayout iblSetLayout{};
+	VkDescriptorSet iblSet{}; // grow this later (irradiance, prefiltered, brdfLUT)
+
+	// Equirect -> Cubemap compute pipeline
 	VkDescriptorSetLayout convertSetLayout{};
 	VkPipelineLayout convertPipelineLayout{};
 	VkPipeline convertPipeline{};
 	VkDescriptorSet convertSet{};
+
+	// Radiance cubemap -> Irradiance cubemap compute pipeline
+	VkDescriptorSetLayout irradianceSetLayout{};
+	VkPipelineLayout irradiancePipelineLayout{};
+	VkPipeline irradiancePipeline{};
+	VkDescriptorSet irradianceSet{};
 };
 
 class VulkanEngine {
@@ -251,6 +266,10 @@ public:
 	
 	void draw();
 	void run();
+
+	void init_irradiance_cubemap_pipeline();
+
+	AllocatedImage generate_irradiance_map_from_cubemap(uint32_t cubeSize, bool mipmapped);
 
 	AllocatedImage create_cubemap_image(uint32_t size, VkFormat format, bool mipmapped);
 

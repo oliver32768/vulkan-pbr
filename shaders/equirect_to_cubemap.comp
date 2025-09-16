@@ -39,6 +39,9 @@ void main() {
     vec3 dir = face_uv_to_dir(face, uv);
     vec2 eq = dir_to_equirect(dir);
     vec3 c = texture(uEquirect, eq).rgb;
+    
+    //vec4 write = vec4(c, 1.0) / (1 + vec4(c, 1.0)); // This was a hack to fix issues caused by bright spots leading to structured noise due to LOGL sampling pattern
 
-    imageStore(uCubeOut, ivec3(gid, int(face)), vec4(c,1.0));
+    vec4 write = vec4(c, 1.0);
+    imageStore(uCubeOut, ivec3(gid, int(face)), write);
 }

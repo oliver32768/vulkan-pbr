@@ -894,7 +894,17 @@ void VulkanEngine::init() {
     init_descriptors();
 
     init_equirect_to_cubemap_pipeline();
-    _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\moon_lab_4k.hdr", 1024, true);
+    // kloofendal_48d_partly_cloudy_puresky_4k
+    // moon_lab_4k
+    // empty_play_room_4k
+    // brown_photostudio_02_4k
+    // snow
+    // metro
+    _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\snow.hdr", 1024, true); 
+
+    init_irradiance_cubemap_pipeline();
+    _ibl.irradiancemap = generate_irradiance_map_from_cubemap(1024, true);
+
     init_ibl_descriptor_set();
 
     init_pipelines();
@@ -1412,6 +1422,96 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx) {
 
 // IBL
 
+void VulkanEngine::init_irradiance_cubemap_pipeline() {
+    DescriptorLayoutBuilder b;
+    b.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // input cubemap
+    b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE); // output irradiance cubemap
+    _ibl.irradianceSetLayout = b.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
+
+    VkPushConstantRange pc{};
+    pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pc.size = sizeof(IrradiancePushConstants); // face size, sample delta
+    pc.offset = 0;
+
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &_ibl.irradianceSetLayout;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pc;
+    VK_CHECK(vkCreatePipelineLayout(_device, &plci, nullptr, &_ibl.irradiancePipelineLayout));
+
+    // shader & pipeline
+    VkShaderModule cs;
+    if (!(vkutil::load_shader_module("../../shaders/irradiance_gen.comp.spv", _device, &cs))) {
+        fmt::print("Error when building the irradiance compute shader \n");
+    }
+    VkComputePipelineCreateInfo cpci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+    cpci.layout = _ibl.irradiancePipelineLayout;
+    cpci.stage = VkPipelineShaderStageCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = cs,
+        .pName = "main"
+    };
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &_ibl.irradiancePipeline));
+    vkDestroyShaderModule(_device, cs, nullptr);
+}
+
+AllocatedImage VulkanEngine::generate_irradiance_map_from_cubemap(uint32_t cubeSize, bool mipmapped) {
+    _ibl.irradiancemap = create_cubemap_image(cubeSize, VK_FORMAT_R32G32B32A32_SFLOAT, mipmapped);
+    VkImageViewCreateInfo arr = vkinit::imageview_create_info(VK_FORMAT_R32G32B32A32_SFLOAT, _ibl.irradiancemap.image, VK_IMAGE_ASPECT_COLOR_BIT);
+    arr.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    arr.subresourceRange.baseMipLevel = 0;
+    arr.subresourceRange.levelCount = 1; // writing only mip 0 here
+    arr.subresourceRange.baseArrayLayer = 0;
+    arr.subresourceRange.layerCount = 6;
+    VkImageView cubeArrayView{};
+    VK_CHECK(vkCreateImageView(_device, &arr, nullptr, &cubeArrayView));
+
+    immediate_submit([&](VkCommandBuffer cmd) {
+        vkutil::transition_image(cmd, _ibl.irradiancemap.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    });
+
+    _ibl.irradianceSet = _ibl.descriptorAllocator.allocate(_device, _ibl.irradianceSetLayout);
+
+    {
+        DescriptorWriter w;
+        w.write_image(0, _ibl.cubemap.imageView, _ibl.linearClampSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        w.write_image(1, cubeArrayView, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        w.update_set(_device, _ibl.irradianceSet);
+    }
+
+    immediate_submit([&](VkCommandBuffer cmd) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ibl.irradiancePipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ibl.irradiancePipelineLayout, 0, 1, &_ibl.irradianceSet, 0, nullptr);
+
+        const uint32_t group = 8;
+        const uint32_t gx = (cubeSize + group - 1) / group;
+        const uint32_t gy = (cubeSize + group - 1) / group;
+
+        IrradiancePushConstants pc;
+        pc.size = cubeSize;
+        pc.sampleCount = 256;
+        vkCmdPushConstants(cmd, _ibl.irradiancePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(IrradiancePushConstants), &pc);
+
+        // write all 6 faces in one go
+        vkCmdDispatch(cmd, gx, gy, 6);
+
+        vkutil::transition_image(cmd, _ibl.irradiancemap.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    });
+
+    if (mipmapped) {
+        immediate_submit([&](VkCommandBuffer cmd) {
+            vkutil::generate_mipmaps(cmd, _ibl.irradiancemap.image, VkExtent2D{ _ibl.irradiancemap.imageExtent.width, _ibl.irradiancemap.imageExtent.height });
+        });
+    }
+
+    // cleanup the temporary per-face views
+    vkDestroyImageView(_device, cubeArrayView, nullptr);
+
+    return _ibl.irradiancemap;
+}
+
 AllocatedImage VulkanEngine::create_cubemap_image(uint32_t size, VkFormat format, bool mipmapped) {
     AllocatedImage img{};
     img.imageFormat = format;
@@ -1424,7 +1524,7 @@ AllocatedImage VulkanEngine::create_cubemap_image(uint32_t size, VkFormat format
     info.imageType = VK_IMAGE_TYPE_2D;
     info.arrayLayers = 6;
     info.mipLevels = mipmapped ? (uint32_t)std::floor(std::log2(size)) + 1 : 1;
-    info.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    info.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT; // This is how Vulkan knows how to use it as a samplerCube I guess
 
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
@@ -1433,7 +1533,7 @@ AllocatedImage VulkanEngine::create_cubemap_image(uint32_t size, VkFormat format
 
     // cube view
     VkImageViewCreateInfo vinfo = vkinit::imageview_create_info(format, img.image, VK_IMAGE_ASPECT_COLOR_BIT);
-    vinfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+    vinfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE; // And this
     vinfo.subresourceRange.levelCount = info.mipLevels;
     vinfo.subresourceRange.layerCount = 6;
     VK_CHECK(vkCreateImageView(_device, &vinfo, nullptr, &img.imageView));
@@ -1457,7 +1557,7 @@ void VulkanEngine::init_equirect_to_cubemap_pipeline() {
     // shader & pipeline
     VkShaderModule cs;
     if (!(vkutil::load_shader_module("../../shaders/equirect_to_cubemap.comp.spv", _device, &cs))) {
-        fmt::print("Error when building the vertex shader \n");
+        fmt::print("Error when building the cubemap compute shader \n");
     }
     VkComputePipelineCreateInfo cpci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
     cpci.layout = _ibl.convertPipelineLayout;
@@ -1516,10 +1616,8 @@ AllocatedImage VulkanEngine::generate_cubemap_from_hdr(const char* hdrPath, uint
     // Populate binding 0 once (equirect sampled)
     {
         DescriptorWriter w;
-        w.write_image(0, _ibl.equirect.imageView, _ibl.linearClampSampler,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        w.write_image(1, cubeArrayView, VK_NULL_HANDLE,
-            VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        w.write_image(0, _ibl.equirect.imageView, _ibl.linearClampSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        w.write_image(1, cubeArrayView, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         w.update_set(_device, _ibl.convertSet);
     }
 
