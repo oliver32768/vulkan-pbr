@@ -894,7 +894,7 @@ void VulkanEngine::init() {
     init_descriptors();
 
     init_equirect_to_cubemap_pipeline();
-    _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\kloofendal_48d_partly_cloudy_puresky_4k.hdr", 1024, true);
+    _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\moon_lab_4k.hdr", 1024, true);
     init_ibl_descriptor_set();
 
     init_pipelines();
@@ -1447,17 +1447,11 @@ void VulkanEngine::init_equirect_to_cubemap_pipeline() {
     b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
     _ibl.convertSetLayout = b.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
 
-    // pipeline layout (push constants: face index & target size)
-    VkPushConstantRange pc{};
-    pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pc.size = sizeof(uint32_t) * 2; // face, resolution
-    pc.offset = 0;
-
     VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     plci.setLayoutCount = 1;
     plci.pSetLayouts = &_ibl.convertSetLayout;
-    plci.pushConstantRangeCount = 1;
-    plci.pPushConstantRanges = &pc;
+    plci.pushConstantRangeCount = 0;
+    plci.pPushConstantRanges = nullptr;
     VK_CHECK(vkCreatePipelineLayout(_device, &plci, nullptr, &_ibl.convertPipelineLayout));
 
     // shader & pipeline
