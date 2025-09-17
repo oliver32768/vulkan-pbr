@@ -34,7 +34,6 @@ vec2 Hammersley2dSeq(uint i, uint sequenceLength) {
     return vec2(float(i) / float(sequenceLength), VanDerCorputBase2(i));
 }
 
-
 vec3 ImportanceSampleGGX(vec2 Xi, vec3 N, float roughness) {
     float a = roughness*roughness;
 	

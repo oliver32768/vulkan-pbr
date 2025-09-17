@@ -162,6 +162,7 @@ struct IBLResources {
 	AllocatedImage cubemap; // cube-compatible, mipmapped
 	AllocatedImage irradiancemap;
 	AllocatedImage prefilteredmap;
+	AllocatedImage brdfLUT;
 	VkSampler linearClampSampler{};
 
 	// Graphics pipeline
@@ -185,6 +186,12 @@ struct IBLResources {
 	VkPipelineLayout prefilterPipelineLayout{};
 	VkPipeline prefilterPipeline{};
 	VkDescriptorSet prefilterSet{};
+
+	// Roughness prefiltering compute pipeline
+	VkDescriptorSetLayout brdfSetLayout{};
+	VkPipelineLayout brdfPipelineLayout{};
+	VkPipeline brdfPipeline{};
+	VkDescriptorSet brdfSet{};
 };
 
 class VulkanEngine {
@@ -280,6 +287,10 @@ public:
 	
 	void draw();
 	void run();
+
+	void init_brdf_integration_pipeline();
+
+	AllocatedImage generate_brdf_lut(uint32_t size, bool mipmapped);
 
 	void init_prefiltered_cubemap_pipeline();
 

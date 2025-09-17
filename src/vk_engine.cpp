@@ -914,6 +914,9 @@ void VulkanEngine::init() {
     init_prefiltered_cubemap_pipeline();
     _ibl.prefilteredmap = generate_prefiltered_map_from_cubemap(1024);
 
+    init_brdf_integration_pipeline();
+    generate_brdf_lut(256, false);
+
     init_ibl_descriptor_set();
 
     init_pipelines();
@@ -1431,6 +1434,104 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx) {
 
 // IBL
 
+void VulkanEngine::init_brdf_integration_pipeline() {
+    DescriptorLayoutBuilder b;
+    b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE); // output prefiltered cubemap
+    _ibl.brdfSetLayout = b.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
+
+    VkPushConstantRange pc{};
+    pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pc.size = sizeof(IrradiancePushConstants); // Placeholder, not sure what/if I need for PCs
+    pc.offset = 0;
+
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &_ibl.brdfSetLayout;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pc;
+    VK_CHECK(vkCreatePipelineLayout(_device, &plci, nullptr, &_ibl.brdfPipelineLayout));
+
+    // shader & pipeline
+    VkShaderModule cs;
+    if (!(vkutil::load_shader_module("../../shaders/brdflut.comp.spv", _device, &cs))) {
+        fmt::print("Error when building the BRDF LUT compute shader \n");
+    }
+    VkComputePipelineCreateInfo cpci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+    cpci.layout = _ibl.brdfPipelineLayout;
+    cpci.stage = VkPipelineShaderStageCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = cs,
+        .pName = "main"
+    };
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &_ibl.brdfPipeline));
+    vkDestroyShaderModule(_device, cs, nullptr);
+}
+
+AllocatedImage VulkanEngine::generate_brdf_lut(uint32_t size, bool mipmapped) {
+    _ibl.brdfLUT = create_image( // compute shader will write to this, create_image just allocates memory and creates VkImage + VkImageView. No actual data yet
+        VkExtent3D{ size, size, 1 }, 
+        VK_FORMAT_R16G16B16A16_SFLOAT, // no idea what BRDF LUTs are usually stored as
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, // not sure, guessing here
+        mipmapped // not sure if I do actually need mipmaps for this?
+    );
+
+    VkImageViewCreateInfo arr = vkinit::imageview_create_info(VK_FORMAT_R16G16B16A16_SFLOAT, _ibl.brdfLUT.image, VK_IMAGE_ASPECT_COLOR_BIT);
+    arr.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    arr.subresourceRange.baseMipLevel = 0;
+    arr.subresourceRange.levelCount = 1; // writing only mip 0 here
+    arr.subresourceRange.baseArrayLayer = 0;
+    arr.subresourceRange.layerCount = 1;
+    VkImageView lutView{};
+    VK_CHECK(vkCreateImageView(_device, &arr, nullptr, &lutView));
+
+    immediate_submit([&](VkCommandBuffer cmd) {
+        vkutil::transition_image(cmd, _ibl.brdfLUT.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    });
+
+    _ibl.brdfSet = _ibl.descriptorAllocator.allocate(_device, _ibl.brdfSetLayout);
+
+    {
+        DescriptorWriter w;
+        w.write_image(0, lutView, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        w.update_set(_device, _ibl.brdfSet);
+    }
+
+    immediate_submit([&](VkCommandBuffer cmd) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ibl.brdfPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ibl.brdfPipelineLayout, 0, 1, &_ibl.brdfSet, 0, nullptr);
+
+        const uint32_t group = 8;
+        const uint32_t gx = (size + group - 1) / group;
+        const uint32_t gy = (size + group - 1) / group;
+
+        IrradiancePushConstants pc;
+        pc.size = size;
+        pc.sampleCount = 64;
+        vkCmdPushConstants(cmd, _ibl.brdfPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(IrradiancePushConstants), &pc);
+
+        vkCmdDispatch(cmd, gx, gy, 1);
+
+        vkutil::transition_image(cmd, _ibl.brdfLUT.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    });
+
+    if (mipmapped) {
+        immediate_submit([&](VkCommandBuffer cmd) {
+            vkutil::generate_mipmaps(cmd, _ibl.brdfLUT.image, VkExtent2D{ _ibl.brdfLUT.imageExtent.width, _ibl.brdfLUT.imageExtent.height });
+        });
+    }
+    else {
+        immediate_submit([&](VkCommandBuffer cmd) {
+            vkutil::transition_image(cmd, _ibl.brdfLUT.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        });
+    }
+
+    // cleanup the temporary per-face views
+    vkDestroyImageView(_device, lutView, nullptr);
+
+    return _ibl.brdfLUT;
+}
+
 void VulkanEngine::init_prefiltered_cubemap_pipeline() {
     DescriptorLayoutBuilder b;
     b.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // input cubemap
@@ -1635,7 +1736,7 @@ AllocatedImage VulkanEngine::create_cubemap_image(uint32_t size, VkFormat format
     img.imageFormat = format;
     img.imageExtent = VkExtent3D{ size, size, 1 };
 
-    VkImageCreateInfo info = vkinit::image_create_info(format,
+    VkImageCreateInfo info = vkinit::image_create_info(format, 
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         img.imageExtent);
 
@@ -1776,6 +1877,7 @@ void VulkanEngine::init_ibl_descriptor_set() {
     b.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // cubemap
     b.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // irradiance cubemap
     b.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // prefiltered cubemap
+    b.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // BRDF LUT
     _ibl.iblSetLayout = b.build(_device, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT);
 
     _ibl.iblSet = _ibl.descriptorAllocator.allocate(_device, _ibl.iblSetLayout);
@@ -1791,5 +1893,6 @@ void VulkanEngine::init_ibl_descriptor_set() {
     w.write_image(0, _ibl.cubemap.imageView, envSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     w.write_image(1, _ibl.irradiancemap.imageView, envSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     w.write_image(2, _ibl.prefilteredmap.imageView, envSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    w.write_image(3, _ibl.brdfLUT.imageView, envSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     w.update_set(_device, _ibl.iblSet);
 }
