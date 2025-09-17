@@ -3,7 +3,7 @@
 layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(binding=0) uniform sampler2D uEquirect;
-layout(binding=1, rgba32f) writeonly uniform image2DArray uCubeOut;
+layout(binding=1, rgba16f) writeonly uniform image2DArray uCubeOut;
 
 // map cube face + uv -> direction
 vec3 face_uv_to_dir(uint face, vec2 uv) {
@@ -41,7 +41,6 @@ void main() {
     vec3 c = texture(uEquirect, eq).rgb;
     
     //vec4 write = vec4(c, 1.0) / (1 + vec4(c, 1.0)); // This was a hack to fix issues caused by bright spots leading to structured noise due to LOGL sampling pattern
-
     vec4 write = vec4(c, 1.0);
     imageStore(uCubeOut, ivec3(gid, int(face)), write);
 }

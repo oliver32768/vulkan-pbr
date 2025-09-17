@@ -36,9 +36,8 @@ void main() {
 
     vec3 env = texture(uEnv, dirWorld).rgb;
 
-    // Simple Reinhard tone map
-    // This looks very wrong, maybe using sRGB swapchain also makes this redundant, unsure
-    env = env / (env + vec3(1.0));
+    // I have no idea if I'm supposed to do this
+    //env = env / (env + vec3(1.0));
 
     outColor = vec4(env, 1.0);
 }

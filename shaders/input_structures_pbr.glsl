@@ -19,3 +19,4 @@ layout(set = 1, binding = 4) uniform sampler2D AOTex;
 layout(set = 1, binding = 5) uniform sampler2D emissiveTex;
 
 layout(set = 2, binding = 0) uniform samplerCube uEnv;
+layout(set = 2, binding = 1) uniform samplerCube uIrradiance;

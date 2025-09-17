@@ -85,6 +85,9 @@ AllocatedImage VulkanEngine::create_image(void* data, VkExtent3D size, VkFormat 
         case VK_FORMAT_R8G8B8A8_SRGB:
             pixel_size = 4;
             break;
+        case VK_FORMAT_R16G16B16A16_SFLOAT:
+            pixel_size = 8;
+            break;
         case VK_FORMAT_R32G32B32A32_SFLOAT:
             pixel_size = 16; // 4 bytes × 4
             break;
@@ -900,7 +903,8 @@ void VulkanEngine::init() {
     // brown_photostudio_02_4k
     // snow
     // metro
-    _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\snow.hdr", 1024, true); 
+    // winter_evening_4k
+    _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\winter_evening_4k.hdr", 1024, true); 
 
     init_irradiance_cubemap_pipeline();
     _ibl.irradiancemap = generate_irradiance_map_from_cubemap(1024, true);
@@ -1458,8 +1462,8 @@ void VulkanEngine::init_irradiance_cubemap_pipeline() {
 }
 
 AllocatedImage VulkanEngine::generate_irradiance_map_from_cubemap(uint32_t cubeSize, bool mipmapped) {
-    _ibl.irradiancemap = create_cubemap_image(cubeSize, VK_FORMAT_R32G32B32A32_SFLOAT, mipmapped);
-    VkImageViewCreateInfo arr = vkinit::imageview_create_info(VK_FORMAT_R32G32B32A32_SFLOAT, _ibl.irradiancemap.image, VK_IMAGE_ASPECT_COLOR_BIT);
+    _ibl.irradiancemap = create_cubemap_image(cubeSize, VK_FORMAT_R16G16B16A16_SFLOAT, mipmapped);
+    VkImageViewCreateInfo arr = vkinit::imageview_create_info(VK_FORMAT_R16G16B16A16_SFLOAT, _ibl.irradiancemap.image, VK_IMAGE_ASPECT_COLOR_BIT);
     arr.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     arr.subresourceRange.baseMipLevel = 0;
     arr.subresourceRange.levelCount = 1; // writing only mip 0 here
@@ -1469,7 +1473,7 @@ AllocatedImage VulkanEngine::generate_irradiance_map_from_cubemap(uint32_t cubeS
     VK_CHECK(vkCreateImageView(_device, &arr, nullptr, &cubeArrayView));
 
     immediate_submit([&](VkCommandBuffer cmd) {
-        vkutil::transition_image(cmd, _ibl.irradiancemap.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(cmd, _ibl.irradiancemap.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS);
     });
 
     _ibl.irradianceSet = _ibl.descriptorAllocator.allocate(_device, _ibl.irradianceSetLayout);
@@ -1491,18 +1495,18 @@ AllocatedImage VulkanEngine::generate_irradiance_map_from_cubemap(uint32_t cubeS
 
         IrradiancePushConstants pc;
         pc.size = cubeSize;
-        pc.sampleCount = 256;
+        pc.sampleCount = 64;
         vkCmdPushConstants(cmd, _ibl.irradiancePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(IrradiancePushConstants), &pc);
 
         // write all 6 faces in one go
         vkCmdDispatch(cmd, gx, gy, 6);
 
-        vkutil::transition_image(cmd, _ibl.irradiancemap.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkutil::transition_image(cmd, _ibl.irradiancemap.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS);
     });
 
     if (mipmapped) {
         immediate_submit([&](VkCommandBuffer cmd) {
-            vkutil::generate_mipmaps(cmd, _ibl.irradiancemap.image, VkExtent2D{ _ibl.irradiancemap.imageExtent.width, _ibl.irradiancemap.imageExtent.height });
+            vkutil::generate_mipmaps_cube(cmd, _ibl.irradiancemap.image, VkExtent2D{ _ibl.irradiancemap.imageExtent.width, _ibl.irradiancemap.imageExtent.height }, 6, VK_FORMAT_R16G16B16A16_SFLOAT);
         });
     }
 
@@ -1581,11 +1585,17 @@ AllocatedImage VulkanEngine::generate_cubemap_from_hdr(const char* hdrPath, uint
         si.minFilter = VK_FILTER_LINEAR;
         si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
         si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.minLod = 0.0f;
+        si.maxLod = VK_LOD_CLAMP_NONE; // (~1000.0f)
+        // or clamp to the highest actual level:
+        // si.maxLod   = float(numLevels - 1);
+        si.mipLodBias = 0.0f;
+        si.anisotropyEnable = VK_FALSE; // not needed for cube sampling/FIS
         VK_CHECK(vkCreateSampler(_device, &si, nullptr, &_ibl.linearClampSampler));
     }
 
-    _ibl.cubemap = create_cubemap_image(cubeSize, VK_FORMAT_R32G32B32A32_SFLOAT, mipmapped);
-    VkImageViewCreateInfo arr = vkinit::imageview_create_info(VK_FORMAT_R32G32B32A32_SFLOAT, _ibl.cubemap.image, VK_IMAGE_ASPECT_COLOR_BIT);
+    _ibl.cubemap = create_cubemap_image(cubeSize, VK_FORMAT_R16G16B16A16_SFLOAT, mipmapped);
+    VkImageViewCreateInfo arr = vkinit::imageview_create_info(VK_FORMAT_R16G16B16A16_SFLOAT, _ibl.cubemap.image, VK_IMAGE_ASPECT_COLOR_BIT);
     arr.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     arr.subresourceRange.baseMipLevel = 0;
     arr.subresourceRange.levelCount = 1; // writing only mip 0 here
@@ -1597,7 +1607,7 @@ AllocatedImage VulkanEngine::generate_cubemap_from_hdr(const char* hdrPath, uint
     // Transition images to correct layouts
     immediate_submit([&](VkCommandBuffer cmd) {
         // equirect already transitioned to SHADER_READ_ONLY_OPTIMAL by create_image()
-        vkutil::transition_image(cmd, _ibl.cubemap.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(cmd, _ibl.cubemap.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS);
      });
 
     {
@@ -1632,12 +1642,12 @@ AllocatedImage VulkanEngine::generate_cubemap_from_hdr(const char* hdrPath, uint
         // write all 6 faces in one go
         vkCmdDispatch(cmd, gx, gy, 6);
 
-        vkutil::transition_image(cmd, _ibl.cubemap.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkutil::transition_image(cmd, _ibl.cubemap.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS);
     });
 
     if (mipmapped) {
         immediate_submit([&](VkCommandBuffer cmd) {
-            vkutil::generate_mipmaps(cmd, _ibl.cubemap.image, VkExtent2D{ _ibl.cubemap.imageExtent.width, _ibl.cubemap.imageExtent.height });
+            vkutil::generate_mipmaps_cube(cmd, _ibl.cubemap.image, VkExtent2D{ _ibl.cubemap.imageExtent.width, _ibl.cubemap.imageExtent.height }, 6, VK_FORMAT_R16G16B16A16_SFLOAT);
         });
     }
 
@@ -1651,6 +1661,7 @@ void VulkanEngine::init_ibl_descriptor_set() {
     DescriptorLayoutBuilder b;
     // binding 0: environment cubemap
     b.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    b.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     _ibl.iblSetLayout = b.build(_device, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT);
 
     _ibl.iblSet = _ibl.descriptorAllocator.allocate(_device, _ibl.iblSetLayout);
@@ -1664,5 +1675,6 @@ void VulkanEngine::init_ibl_descriptor_set() {
 
     DescriptorWriter w;
     w.write_image(0, _ibl.cubemap.imageView, envSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    w.write_image(1, _ibl.irradiancemap.imageView, envSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     w.update_set(_device, _ibl.iblSet);
 }

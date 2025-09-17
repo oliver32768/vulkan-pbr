@@ -2,7 +2,7 @@
 layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(binding=0) uniform samplerCube uEnv;
-layout(binding=1, rgba32f) writeonly uniform image2DArray uIrradiance;
+layout(binding=1, rgba16f) writeonly uniform image2DArray uIrradiance;
 
 // (or compute size from gl_NumWorkGroups)
 layout(push_constant) uniform PC {
@@ -24,18 +24,13 @@ vec3 face_uv_to_dir(uint face, vec2 uv) {
 }
 
 // Radical inverse in base 2 (Van der Corput)
-float radicalInverse_VdC(uint bits) {
-    bits = (bits << 16u) | (bits >> 16u);
-    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
-    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
-    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
-    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
-    return float(bits) * 2.3283064365386963e-10; // / 2^32
+float VanDerCorputBase2(uint i) {
+    return bitfieldReverse(i) * 2.3283064365386963e-10;
 }
 
-vec2 hammersley(uint i, uint N) {
-    return vec2(float(i) / float(N), radicalInverse_VdC(i));
-}
+vec2 Hammersley2dSeq(uint i, uint sequenceLength) {
+    return vec2(float(i) / float(sequenceLength), VanDerCorputBase2(i));
+} 
 
 // Cosine weighted hemisphere sample in tangent space
 vec3 sampleCosineHemisphere(vec2 Xi) {
@@ -68,7 +63,16 @@ float hash11(uint x) {
     return float(x) * 2.3283064365386963e-10;
 }
 
+float texelSolidAngleBase(uint faceSize0) {
+    // Average solid angle per texel of a cubemap at mip 0 (good enough for FIS)
+    return (4.0 * PI) / (6.0 * float(faceSize0 * faceSize0));
+}
+
 void main() {
+    // TODO: Supply these as PCs
+    float mipBias = 0.75;
+    uint envFaceSize0 = 1024;
+
     ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
     if (gid.z >= 6 || gid.x >= int(pc.size) || gid.y >= int(pc.size)) return;
 
@@ -76,25 +80,31 @@ void main() {
     vec2 uv = (vec2(gid.xy) + 0.5) / float(pc.size);
 
     vec3 N = face_uv_to_dir(face, uv);
-
     vec3 T, B;
     makeTBN(N, T, B);
 
-    // Per pixel rotation
     uint seed = uint(gid.x) * 1973u ^ uint(gid.y) * 9277u ^ face * 26699u;
     vec2 rot = vec2(hash11(seed), hash11(seed ^ 0x9E3779B9u));
 
     vec3 irradiance = vec3(0.0);
 
+    float omega_p0 = texelSolidAngleBase(envFaceSize0);
+    float maxMip = float(textureQueryLevels(uEnv) - 1);
+
     for (uint i = 0u; i < pc.sampleCount; ++i) {
-        vec2 Xi = hammersley(i, pc.sampleCount);
-        Xi = fract(Xi + rot); // Cranley Patterson rotation
-        vec3 H = sampleCosineHemisphere(Xi); // tangent space
-        vec3 L = normalize(T * H.x + B * H.y + N * H.z); // to world
-        irradiance += texture(uEnv, L).rgb;
+        vec2 Xi = Hammersley2dSeq(i, pc.sampleCount);
+        Xi = fract(Xi + rot);
+        vec3 H = sampleCosineHemisphere(Xi); // Cosine-weighted sample in tangent space
+        vec3 L = normalize(T * H.x + B * H.y + N * H.z); // World-space direction
+        float pdf = H.z * (1.0 / PI); // pdf for cosine-weighted hemisphere
+        float omega_s = 1.0 / (float(pc.sampleCount) * max(pdf, 1e-6)); // Solid angle represented by this sample
+        float lod = 0.5 * log2(omega_s / omega_p0) + mipBias; // Choose mip whose texels roughly match omega_s
+        lod = clamp(lod, 0.0, maxMip);
+        vec3 samp = textureLod(uEnv, L, lod).rgb;
+        irradiance += samp; // NOTE: no extra cos term here
     }
 
-    irradiance *= (PI / float(pc.sampleCount)); // integral scaling for cosine weighted sampling
-
+    // Cosine-weighted estimator => multiply by PI/N
+    irradiance *= (PI / float(pc.sampleCount));
     imageStore(uIrradiance, gid, vec4(irradiance, 1.0));
 }

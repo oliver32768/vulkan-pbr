@@ -94,22 +94,24 @@ void main() {
     vec3 F = F_Schlick(VoH, F0);
     float G = V_SmithGGXCorrelated(NoV, NoL, alpha);
 
-    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
-
+    //vec3 kD = (vec3(1.0) - F) * (1.0 - metallic); 
+    vec3 kD = (vec3(1.0) - F_Schlick(NoL, F0)) * (vec3(1.0) - F_Schlick(NoV, F0)); // devsh: "(1 - Fresnel(N,L)) * (1 - Fresnel(N,V))"
     vec3 Fr = (D * G * F); // 1.0 / max(4.0 * NoV * NoL, 1e-4) is already part of the G we calculate
-    vec3 Fd = kD * baseColor / PI;
+    vec3 Fd = kD * (baseColor / PI);
 
-    // directional light color & intensity
+    // directional light
     vec3 L_i = sceneData.sunlightColor.rgb * sceneData.sunlightColor.w;
     float cos_i = NoL;
 
-    // TODO: I think this linear separation is what devsh says is wrong
-    // f_r = F(H,L) * G(H,L,V) * D(H) / (4 * dot(V,N) * dot(L,N)) + (1 - F(N,L)) * (1 - F(N,V)) * (baseColor / PI)
     vec3 direct = (Fd + Fr) * L_i * cos_i;
 
-    //vec3 ambient = sceneData.ambientColor.rgb * baseColor * ao;
+    vec3 kS_ambient = F_Schlick(NoV, F0);
+    vec3 kD_ambient = 1.0 - kS_ambient;
+    vec3 irradiance = texture(uIrradiance, N).rgb;
+    vec3 diffuse = irradiance * baseColor;
+    vec3 ambient = (kD_ambient * diffuse) * ao; 
 
-    vec3 color = direct + emissive;
+    vec3 color = direct + emissive + ambient;
 
     outFragColor = vec4(color, alphaOut);
 }
