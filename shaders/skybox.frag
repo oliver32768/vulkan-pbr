@@ -13,6 +13,8 @@ layout(set = 0, binding = 0) uniform SceneData {
 } scene;
 
 layout(set = 1, binding = 0) uniform samplerCube uEnv;
+layout(set = 1, binding = 1) uniform samplerCube uIrradiance;
+layout(set = 1, binding = 2) uniform samplerCube uPrefiltered;
 
 vec3 reconstructViewDir(vec2 ndc) {
     // Clip space pos on far plane (z=1, w=1)
@@ -34,7 +36,7 @@ void main() {
     vec3 dirView  = reconstructViewDir(vNdc);
     vec3 dirWorld = invR * dirView;
 
-    vec3 env = texture(uEnv, dirWorld).rgb;
+    vec3 env = textureLod(uEnv, dirWorld, 0.0f).rgb;
 
     // I have no idea if I'm supposed to do this
     //env = env / (env + vec3(1.0));

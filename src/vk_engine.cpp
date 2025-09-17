@@ -28,6 +28,8 @@ constexpr bool bUseValidationLayers = true;
 constexpr bool bUseValidationLayers = false;
 #endif
 
+uint32_t MAX_MIPS = 15;
+
 VulkanEngine* loadedEngine = nullptr;
 
 // Frustum culling
@@ -909,6 +911,9 @@ void VulkanEngine::init() {
     init_irradiance_cubemap_pipeline();
     _ibl.irradiancemap = generate_irradiance_map_from_cubemap(1024, true);
 
+    init_prefiltered_cubemap_pipeline();
+    _ibl.prefilteredmap = generate_prefiltered_map_from_cubemap(1024);
+
     init_ibl_descriptor_set();
 
     init_pipelines();
@@ -1426,6 +1431,115 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx) {
 
 // IBL
 
+void VulkanEngine::init_prefiltered_cubemap_pipeline() {
+    DescriptorLayoutBuilder b;
+    b.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // input cubemap
+    b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, MAX_MIPS); // output prefiltered cubemap
+    _ibl.prefilterSetLayout = b.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
+
+    VkPushConstantRange pc{};
+    pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pc.size = sizeof(PrefilterPushConstants); // size, sample count, mip level, roughness
+    pc.offset = 0;
+
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &_ibl.prefilterSetLayout;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pc;
+    VK_CHECK(vkCreatePipelineLayout(_device, &plci, nullptr, &_ibl.prefilterPipelineLayout));
+
+    // shader & pipeline
+    VkShaderModule cs;
+    if (!(vkutil::load_shader_module("../../shaders/prefilter.comp.spv", _device, &cs))) {
+        fmt::print("Error when building the prefiltering compute shader \n");
+    }
+    VkComputePipelineCreateInfo cpci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+    cpci.layout = _ibl.prefilterPipelineLayout;
+    cpci.stage = VkPipelineShaderStageCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = cs,
+        .pName = "main"
+    };
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &_ibl.prefilterPipeline));
+    vkDestroyShaderModule(_device, cs, nullptr);
+}
+
+AllocatedImage VulkanEngine::generate_prefiltered_map_from_cubemap(uint32_t cubeSize) {
+    _ibl.prefilteredmap = create_cubemap_image(cubeSize, VK_FORMAT_R16G16B16A16_SFLOAT, true);
+
+    std::vector<VkImageView> prefilterMipViews;
+    const uint32_t totalMips = (uint32_t)std::floor(std::log2(cubeSize)) + 1;
+    prefilterMipViews.reserve(totalMips);
+    for (uint32_t m = 0; m < totalMips; ++m) {
+        VkImageViewCreateInfo v = vkinit::imageview_create_info(VK_FORMAT_R16G16B16A16_SFLOAT, _ibl.prefilteredmap.image, VK_IMAGE_ASPECT_COLOR_BIT);
+        v.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        v.subresourceRange.baseMipLevel = m;
+        v.subresourceRange.levelCount = 1;
+        v.subresourceRange.baseArrayLayer = 0;
+        v.subresourceRange.layerCount = 6;
+        VkImageView view;
+        VK_CHECK(vkCreateImageView(_device, &v, nullptr, &view));
+        prefilterMipViews.push_back(view);
+    }
+
+    immediate_submit([&](VkCommandBuffer cmd) {
+        vkutil::transition_image(cmd, _ibl.prefilteredmap.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS);
+    });
+
+    _ibl.prefilterSet = _ibl.descriptorAllocator.allocate(_device, _ibl.prefilterSetLayout);
+
+    {
+        DescriptorWriter w;
+        w.write_image(0, _ibl.cubemap.imageView, _ibl.linearClampSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+
+        for (uint32_t m = 0; m < totalMips; ++m) {
+            w.write_image(1, m, prefilterMipViews[m], VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        }
+        for (uint32_t m = totalMips; m < MAX_MIPS; ++m) {
+            w.write_image(1, m, prefilterMipViews.back(), VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        }
+
+        w.update_set(_device, _ibl.prefilterSet);
+    }
+
+    immediate_submit([&](VkCommandBuffer cmd) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ibl.prefilterPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ibl.prefilterPipelineLayout, 0, 1, &_ibl.prefilterSet, 0, nullptr);
+
+        const uint32_t group = 8;
+        PrefilterPushConstants pc{};
+        pc.sampleCount = 64;
+
+        for (uint32_t mip = 0; mip < totalMips; ++mip) {
+            const uint32_t mipSize = std::max(1u, cubeSize >> mip);
+            const uint32_t gx = (mipSize + group - 1) / group;
+            const uint32_t gy = (mipSize + group - 1) / group;
+
+            pc.size = mipSize;
+            pc.mipLevel = mip;
+            pc.roughness = (totalMips > 1) ? float(mip) / float(totalMips - 1) : 0.0f;
+
+            vkCmdPushConstants(cmd, _ibl.prefilterPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PrefilterPushConstants), &pc);
+
+            // z dimension = 6 faces
+            vkCmdDispatch(cmd, gx, gy, 6);
+            // no barrier needed: each mip is a disjoint subresource
+        }
+
+        // after all writes, make the whole image shader-readable for later sampling
+        vkutil::transition_image(cmd, _ibl.prefilteredmap.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS);
+    });
+
+    // cleanup the temporary per-face views
+    for (uint32_t m = 0; m < totalMips; ++m) {
+        vkDestroyImageView(_device, prefilterMipViews[m], nullptr);
+    }
+
+    return _ibl.prefilteredmap;
+}
+
 void VulkanEngine::init_irradiance_cubemap_pipeline() {
     DescriptorLayoutBuilder b;
     b.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // input cubemap
@@ -1659,9 +1773,9 @@ AllocatedImage VulkanEngine::generate_cubemap_from_hdr(const char* hdrPath, uint
 
 void VulkanEngine::init_ibl_descriptor_set() {
     DescriptorLayoutBuilder b;
-    // binding 0: environment cubemap
-    b.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-    b.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    b.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // cubemap
+    b.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // irradiance cubemap
+    b.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // prefiltered cubemap
     _ibl.iblSetLayout = b.build(_device, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT);
 
     _ibl.iblSet = _ibl.descriptorAllocator.allocate(_device, _ibl.iblSetLayout);
@@ -1676,5 +1790,6 @@ void VulkanEngine::init_ibl_descriptor_set() {
     DescriptorWriter w;
     w.write_image(0, _ibl.cubemap.imageView, envSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     w.write_image(1, _ibl.irradiancemap.imageView, envSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    w.write_image(2, _ibl.prefilteredmap.imageView, envSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     w.update_set(_device, _ibl.iblSet);
 }

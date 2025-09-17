@@ -148,12 +148,20 @@ struct IrradiancePushConstants {
 	uint32_t sampleCount;
 };
 
+struct PrefilterPushConstants {
+	uint32_t size;
+	uint32_t sampleCount;
+	uint32_t mipLevel;
+	float roughness;
+};
+
 struct IBLResources {
 	DescriptorAllocatorGrowable descriptorAllocator;
 
 	AllocatedImage equirect; // 2D HDR input
 	AllocatedImage cubemap; // cube-compatible, mipmapped
 	AllocatedImage irradiancemap;
+	AllocatedImage prefilteredmap;
 	VkSampler linearClampSampler{};
 
 	// Graphics pipeline
@@ -171,6 +179,12 @@ struct IBLResources {
 	VkPipelineLayout irradiancePipelineLayout{};
 	VkPipeline irradiancePipeline{};
 	VkDescriptorSet irradianceSet{};
+
+	// Roughness prefiltering compute pipeline
+	VkDescriptorSetLayout prefilterSetLayout{};
+	VkPipelineLayout prefilterPipelineLayout{};
+	VkPipeline prefilterPipeline{};
+	VkDescriptorSet prefilterSet{};
 };
 
 class VulkanEngine {
@@ -266,6 +280,10 @@ public:
 	
 	void draw();
 	void run();
+
+	void init_prefiltered_cubemap_pipeline();
+
+	AllocatedImage generate_prefiltered_map_from_cubemap(uint32_t cubeSize);
 
 	void init_irradiance_cubemap_pipeline();
 

@@ -1,0 +1,113 @@
+#version 460
+
+#define MAX_MIPS 15
+const float PI = 3.14159265358979323846;
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout (binding = 0) uniform samplerCube uSrcEnv;
+layout (binding = 1, rgba16f) writeonly uniform image2DArray uDstMip[MAX_MIPS];
+
+layout (push_constant) uniform PC {
+    uint faceSize;     // mip's face size (pixels)
+    uint sampleCount;  // number of GGX samples
+    uint mipLevel;     // destination mip index
+    float roughness;   // [0..1], typically mip / (totalMips-1)
+} pc;
+
+vec3 face_uv_to_dir(uint face, vec2 uv) {
+    uv = uv * 2.0 - 1.0; // [0,1] -> [-1,1]
+    if (face==0) return normalize(vec3( 1.0, -uv.y, -uv.x)); // +X
+    if (face==1) return normalize(vec3(-1.0, -uv.y,  uv.x)); // -X
+    if (face==2) return normalize(vec3( uv.x,  1.0,  uv.y)); // +Y
+    if (face==3) return normalize(vec3( uv.x, -1.0, -uv.y)); // -Y
+    if (face==4) return normalize(vec3( uv.x, -uv.y,  1.0)); // +Z
+    return normalize(vec3(-uv.x, -uv.y, -1.0)); // -Z
+}
+
+// Radical inverse in base 2 (Van der Corput)
+float VanDerCorputBase2(uint i) {
+    return bitfieldReverse(i) * 2.3283064365386963e-10;
+}
+
+vec2 Hammersley2dSeq(uint i, uint sequenceLength) {
+    return vec2(float(i) / float(sequenceLength), VanDerCorputBase2(i));
+}
+
+
+vec3 ImportanceSampleGGX(vec2 Xi, vec3 N, float roughness) {
+    float a = roughness*roughness;
+	
+    float phi = 2.0 * PI * Xi.x;
+    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a*a - 1.0) * Xi.y));
+    float sinTheta = sqrt(1.0 - cosTheta*cosTheta);
+	
+    // from spherical coordinates to cartesian coordinates
+    vec3 H;
+    H.x = cos(phi) * sinTheta;
+    H.y = sin(phi) * sinTheta;
+    H.z = cosTheta;
+	
+    // from tangent-space vector to world-space sample vector
+    vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, N));
+    vec3 bitangent = cross(N, tangent);
+	
+    vec3 sampleVec = tangent * H.x + bitangent * H.y + N * H.z;
+    return normalize(sampleVec);
+}  
+
+float DistributionGGX(vec3 N, vec3 H, float roughness) {
+    float a = roughness*roughness;
+    float a2 = a*a;
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH*NdotH;
+
+    float nom = a2;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = PI * denom * denom;
+
+    return nom / denom;
+}
+
+void main() {		
+    ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+    if (gid.z >= 6 || gid.x >= int(pc.faceSize) || gid.y >= int(pc.faceSize)) return;
+    uint face = gid.z;
+    vec2 uv = (vec2(gid.xy) + 0.5) / float(pc.faceSize);
+    vec3 N = face_uv_to_dir(face, uv);
+    vec3 R = N;
+    vec3 V = R;
+
+    float totalWeight = 0.0;   
+    vec3 prefilteredColor = vec3(0.0);     
+
+    int srcLevels = textureQueryLevels(uSrcEnv);
+
+    for (uint i = 0u; i < pc.sampleCount; ++i) {
+        vec2 Xi = Hammersley2dSeq(i, pc.sampleCount);
+        vec3 H = ImportanceSampleGGX(Xi, N, pc.roughness);
+        vec3 L = normalize(2.0 * dot(V, H) * H - V);
+
+        float NdotL = max(dot(N, L), 0.0);
+        if(NdotL > 0.0) {
+            // sample from the environment's mip level based on roughness/pdf
+            float D = DistributionGGX(N, H, pc.roughness);
+            float NdotH = max(dot(N, H), 0.0);
+            float HdotV = max(dot(H, V), 0.0);
+            float pdf = D * NdotH / (4.0 * HdotV) + 0.0001; 
+
+            float saTexel  = 4.0 * PI / (6.0 * float(pc.faceSize) * float(pc.faceSize));
+            float saSample = 1.0 / (float(pc.sampleCount) * pdf + 0.0001);
+
+            float mipLevel = pc.roughness == 0.0 ? 0.0 : 0.5 * log2(saSample / saTexel); 
+            mipLevel = clamp(mipLevel, 0.0, float(max(0, srcLevels - 1)));
+            
+            prefilteredColor += textureLod(uSrcEnv, L, mipLevel).rgb * NdotL;
+            totalWeight += NdotL;
+        }
+    }
+
+    prefilteredColor = prefilteredColor / totalWeight;
+    imageStore(uDstMip[pc.mipLevel], gid, vec4(prefilteredColor, 1.0));
+} 
