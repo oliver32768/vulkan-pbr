@@ -77,6 +77,7 @@ void main() {
     vec3 V = normalize(camPos - vWorldPos); // towards camera
     vec3 L = normalize(sceneData.sunlightDirection.xyz); 
     vec3 H = normalize(V + L);
+    vec3 R = reflect(-V, N);   
 
     float NoV = abs(dot(N, V)) + 1e-5;
     float NoL = clamp(dot(N, L), 0.0, 1.0); // cos(theta_i)
@@ -94,8 +95,8 @@ void main() {
     vec3 F = F_Schlick(VoH, F0);
     float G = V_SmithGGXCorrelated(NoV, NoL, alpha);
 
-    //vec3 kD = (vec3(1.0) - F) * (1.0 - metallic); 
-    vec3 kD = (vec3(1.0) - F_Schlick(NoL, F0)) * (vec3(1.0) - F_Schlick(NoV, F0)); // devsh: "(1 - Fresnel(N,L)) * (1 - Fresnel(N,V))"
+    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic); 
+    //vec3 kD = (vec3(1.0) - F_Schlick(NoL, F0)) * (vec3(1.0) - F_Schlick(NoV, F0)); // devsh: "(1 - Fresnel(N,L)) * (1 - Fresnel(N,V))"
     vec3 Fr = (D * G * F); // 1.0 / max(4.0 * NoV * NoL, 1e-4) is already part of the G we calculate
     vec3 Fd = kD * (baseColor / PI);
 
@@ -105,11 +106,20 @@ void main() {
 
     vec3 direct = (Fd + Fr) * L_i * cos_i;
 
-    vec3 kS_ambient = F_Schlick(NoV, F0);
-    vec3 kD_ambient = 1.0 - kS_ambient;
+    const float MAX_REFLECTION_LOD = floor(log2(1024)) + 1; // use `textureQueryLevels`?
+    vec3 F_NV = F_Schlick(max(dot(N, V), 0.0), F0);
+
+    vec3 kS_ibl = F_NV;
+    vec3 kD_ibl = (1.0 - kS_ibl) * (1.0 - metallic); // not devsh
+  
     vec3 irradiance = texture(uIrradiance, N).rgb;
     vec3 diffuse = irradiance * baseColor;
-    vec3 ambient = (kD_ambient * diffuse) * ao; 
+  
+    vec3 prefilteredColor = textureLod(uPrefiltered, R, roughness * MAX_REFLECTION_LOD).rgb; // idk if this should be roughness or roughness^2
+    vec2 envBRDF = texture(uBrdfLUT, vec2(max(dot(N, V), 0.0), roughness)).rg; // same here
+    vec3 specular = prefilteredColor * (F * envBRDF.x + envBRDF.y);
+  
+    vec3 ambient = (kD_ibl * diffuse + specular) * ao; 
 
     vec3 color = direct + emissive + ambient;
 

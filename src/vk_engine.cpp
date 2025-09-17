@@ -906,7 +906,7 @@ void VulkanEngine::init() {
     // snow
     // metro
     // winter_evening_4k
-    _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\winter_evening_4k.hdr", 1024, true); 
+    _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\snow.hdr", 1024, true); 
 
     init_irradiance_cubemap_pipeline();
     _ibl.irradiancemap = generate_irradiance_map_from_cubemap(1024, true);
@@ -924,8 +924,8 @@ void VulkanEngine::init() {
     init_default_data();
 
     mainCamera.velocity = glm::vec3(0.f);
-    mainCamera.position = glm::vec3(-2.f, 0.f, 2.f);
-    mainCamera.pitch = 0.0;
+    mainCamera.position = glm::vec3(-2.f, 0.5f, 2.f);
+    mainCamera.pitch = -(glm::pi<float>() / 16.0);
     mainCamera.yaw = glm::pi<float>() / 4.0;
 
     std::string structurePath = { "..\\..\\assets\\DamagedHelmet.glb" };
