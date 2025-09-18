@@ -29,6 +29,10 @@ mat3 buildTBN(vec3 N, vec3 pos, vec2 uv) {
     return mat3(T, B, N);
 }
 
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
+    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}   
+
 // F
 vec3 F_Schlick(float u, vec3 f0) {
     return f0 + (vec3(1.0) - f0) * pow(1.0 - u, 5.0);
@@ -106,8 +110,10 @@ void main() {
 
     vec3 direct = (Fd + Fr) * L_i * cos_i;
 
+    // --- IBL ---
+
     const float MAX_REFLECTION_LOD = floor(log2(1024)) + 1; // use `textureQueryLevels`?
-    vec3 F_NV = F_Schlick(max(dot(N, V), 0.0), F0);
+    vec3 F_NV = fresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
 
     vec3 kS_ibl = F_NV;
     vec3 kD_ibl = (1.0 - kS_ibl) * (1.0 - metallic); // not devsh
