@@ -906,7 +906,7 @@ void VulkanEngine::init() {
     // snow
     // metro
     // winter_evening_4k
-    _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\snow.hdr", 1024, true); 
+    _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\winter_evening_4k.hdr", 1024, true); 
 
     init_irradiance_cubemap_pipeline();
     _ibl.irradiancemap = generate_irradiance_map_from_cubemap(1024, true);
@@ -928,10 +928,16 @@ void VulkanEngine::init() {
     mainCamera.pitch = -(glm::pi<float>() / 16.0);
     mainCamera.yaw = glm::pi<float>() / 4.0;
 
-    std::string structurePath = { "..\\..\\assets\\DamagedHelmet.glb" };
-    auto structureFile = loadGltf(this, structurePath);
-    assert(structureFile.has_value());
-    loadedScenes["structure"] = *structureFile;
+    std::string helmetPath = { "..\\..\\assets\\DamagedHelmet.glb" };
+    auto helmetFile = loadGltf(this, helmetPath);
+    assert(helmetFile.has_value());
+    loadedScenes["DamagedHelmet"] = *helmetFile;
+
+    //std::string bistroPath = { "..\\..\\assets\\Bistro_Godot.glb" };
+    std::string bistroPath = { "..\\..\\assets\\Sponza\\Sponza.gltf" };
+    auto bistroFile = loadGltf(this, bistroPath);
+    assert(bistroFile.has_value());
+    loadedScenes["Bistro"] = *bistroFile;
 
     // everything went fine
     _isInitialized = true;
@@ -980,7 +986,8 @@ void VulkanEngine::cleanup() {
 void VulkanEngine::update_scene() {
     auto start = std::chrono::system_clock::now();
 
-    loadedScenes["structure"]->Draw(glm::mat4{ 1.f }, mainDrawContext);
+    loadedScenes["DamagedHelmet"]->Draw(glm::mat4{ 1.f }, mainDrawContext);
+    loadedScenes["Bistro"]->Draw(glm::mat4{ 1.f }, mainDrawContext);
 
     mainCamera.update(deltaTime);
     sceneData.view = mainCamera.getViewMatrix();
