@@ -99,6 +99,7 @@ struct GPUSceneData {
 	glm::vec4 ambientColor;
 	glm::vec4 sunlightDirection; // w for sun power
 	glm::vec4 sunlightColor;
+	glm::mat4 lightSpaceMatrix;
 };
 
 struct ComputeEffect {
@@ -194,12 +195,43 @@ struct IBLResources {
 	VkDescriptorSet brdfSet{};
 };
 
+struct GPUShadowMapData {
+	glm::mat4 lightSpaceMatrix;
+};
+
+struct ShadowMappingResources {
+	DescriptorAllocatorGrowable descriptorAllocator;
+
+	AllocatedImage shadowMap;
+	VkSampler shadowSampler{};
+
+	// Graphics pipeline
+	VkDescriptorSetLayout shadowSetLayout{};
+	VkDescriptorSet shadowSet{}; 
+
+	// Shadow mapping prepass
+	VkDescriptorSetLayout prepassSetLayout{};
+	VkPipelineLayout prepassPipelineLayout{};
+	VkPipeline prepassPipeline{};
+	VkDescriptorSet prepassSet{};
+
+	GPUShadowMapData data;
+};
+
 class VulkanEngine {
 public:
 	Camera mainCamera;
 	double deltaTime;
 	EngineStats stats;
 	std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
+
+	float mAzimuth = glm::radians(60.0f);
+	float mZenith = glm::radians(30.0f);
+	float lightDist = 90.0f;
+	float lightIntensity = 12.5f;
+	glm::vec3 lightColor = glm::vec3(1.0f, 0.8f, 0.8f);
+
+	ShadowMappingResources _shadowRes;
 
 	IBLResources _ibl;
 	VkPipelineLayout _skyboxPipelineLayout;
@@ -287,6 +319,10 @@ public:
 	
 	void draw();
 	void run();
+
+	void init_shadow_mapping_pipeline();
+
+	void init_shadow_mapping_descriptor_set();
 
 	void init_brdf_integration_pipeline();
 

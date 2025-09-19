@@ -8,6 +8,7 @@ layout (location = 0) out vec3 vWorldPos;
 layout (location = 1) out vec3 vWorldNormal;
 layout (location = 2) out vec2 vUV;
 layout (location = 3) out vec3 vVertexColor;
+layout (location = 4) out vec4 vFragPosLightSpace;
 
 struct Vertex {
     vec3 position;
@@ -37,6 +38,8 @@ void main() {
     vWorldNormal = worldN;
     vUV = vec2(v.uv_x, v.uv_y);
     vVertexColor = v.color.rgb;
+
+    vFragPosLightSpace = sceneData.lightSpaceMatrix * vec4(worldPos.xyz, 1.0);
 
     gl_Position = sceneData.viewproj * worldPos;
 }

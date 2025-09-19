@@ -7,6 +7,7 @@ public:
     glm::vec3 position;
     float pitch{ 0.f }; // vertical rotation
     float yaw{ 0.f }; // horizontal rotation
+    bool rotateHeld = false; 
 
     glm::mat4 getViewMatrix();
     glm::mat4 getRotationMatrix();

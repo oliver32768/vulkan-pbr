@@ -7,6 +7,7 @@ layout (location = 0) in vec3 vWorldPos;
 layout (location = 1) in vec3 vWorldNormal;
 layout (location = 2) in vec2 vUV;
 layout (location = 3) in vec3 vVertexColor;
+layout (location = 4) in vec4 vFragPosLightSpace;
 
 layout (location = 0) out vec4 outFragColor;
 
@@ -57,10 +58,63 @@ vec3 reinhardTonemap(vec3 color) {
     return color / (color + vec3(1.0));
 }
 
+// Returns an exact shadow bias in the space of whatever texelWidth is in.
+// N and L are expected to be normalized
+float GetShadowBias(vec3 N, vec3 L, float texelWidth) {
+  const float sqrt2 = 1.41421356; // Mul by sqrt2 to get diagonal length
+  const float quantize = 2.0 / (1 << 23); // Arbitrary constant that should help prevent most numerical issues
+  const float b = sqrt2 * texelWidth / 2.0;
+  const float NoL = clamp(abs(dot(N, L)), 0.0001, 1.0);
+  return quantize + b * length(cross(N, L)) / NoL;
+}
+
+vec3 ACESFilm(vec3 x) {
+    // Narkowicz 2015 approximation
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x*(a*x + b)) / (x*(c*x + d) + e), 0.0, 1.0);
+}
+
+float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
+    vec3 projCoords = vFragPosLightSpace.xyz / vFragPosLightSpace.w;
+    vec2 uv = projCoords.xy * 0.5 + 0.5; // map from [-1,1] to [0,1]
+    float currentDepth = projCoords.z; // Vulkan NDC z is already [0,1]; don't remap
+    float closestDepth = texture(uShadowMap, uv).r; 
+
+    vec2 texelSize = 1.0 / textureSize(uShadowMap, 0);
+    float bias = GetShadowBias(normalize(normal), normalize(lightDir), texelSize.x);
+    float shadow = 0.0;
+    for(int x = -1; x <= 1; ++x)
+    {
+        for(int y = -1; y <= 1; ++y)
+        {
+            float pcfDepth = texture(uShadowMap, uv + vec2(x, y) * texelSize).r; 
+            shadow += (currentDepth + bias) < pcfDepth ? 1.0 : 0.0;     
+        }    
+    }
+    shadow /= 9.0;
+
+    //float shadow = (currentDepth + bias) < closestDepth ? 1.0 : 0.0; // reverse z
+
+    if (projCoords.z > 1.0) { 
+        shadow = 0.0; 
+    }
+
+    return shadow;
+}
+
 void main() {
     vec3 camPos = inverse(sceneData.view)[3].xyz;
 
     vec4 baseSample = texture(colorTex, vUV);
+
+    if (baseSample.w < 0.01) {
+        discard;
+    }
+
     vec3 baseColor = baseSample.rgb * materialData.colorFactors.rgb * vVertexColor;
     float alphaOut = baseSample.a * materialData.colorFactors.a;
 
@@ -119,15 +173,34 @@ void main() {
     vec3 kD_ibl = (1.0 - kS_ibl) * (1.0 - metallic); // not devsh
   
     vec3 irradiance = texture(uIrradiance, N).rgb;
-    vec3 diffuse = irradiance * baseColor;
+    vec3 diffuse = irradiance * (baseColor / PI);
   
-    vec3 prefilteredColor = textureLod(uPrefiltered, R, roughness * MAX_REFLECTION_LOD).rgb; // idk if this should be roughness or roughness^2
+    int maxMip = textureQueryLevels(uPrefiltered) - 1;
+    vec3 prefilteredColor = textureLod(uPrefiltered, R, roughness * maxMip).rgb; // idk if this should be roughness or roughness^2
     vec2 envBRDF = texture(uBrdfLUT, vec2(max(dot(N, V), 0.0), roughness)).rg; // same here
-    vec3 specular = prefilteredColor * (F * envBRDF.x + envBRDF.y);
+    vec3 specular = prefilteredColor * (F_NV * envBRDF.x + envBRDF.y);
   
     vec3 ambient = (kD_ibl * diffuse + specular) * ao; 
 
-    vec3 color = direct + emissive + ambient;
+    // --- Shadow Mapping ---
+    float shadow = ShadowCalculation(vFragPosLightSpace, normalize(vWorldNormal), L); // use geometric normal?
+
+    vec3 color = emissive + ambient + ((1.0 - shadow) * direct);
 
     outFragColor = vec4(color, alphaOut);
+
+    //outFragColor = vec4(vec3(roughness), alphaOut);
+
+    // Debug: show shadows only
+    //outFragColor = vec4(vec3(shadow), 1.0);
+
+    // Debug: show light space or shadow map depth
+    //vec3 projCoords = vFragPosLightSpace.xyz / vFragPosLightSpace.w;
+    //vec2 uv = projCoords.xy * 0.5 + 0.5; // map from [-1,1] to [0,1]
+    //float receiverDepth = projCoords.z; // Vulkan NDC z is already [0,1]; don't remap
+    //float closestDepth = texture(uShadowMap, uv).r;
+    // Debug 1: receiver depth (what this fragment's depth would write)
+    //outFragColor = vec4(receiverDepth);
+    // Debug 2: depth stored in the shadow map at same UV
+    //outFragColor = vec4(closestDepth);
 }

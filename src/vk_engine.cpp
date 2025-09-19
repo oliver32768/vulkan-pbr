@@ -32,44 +32,45 @@ uint32_t MAX_MIPS = 15;
 
 VulkanEngine* loadedEngine = nullptr;
 
+std::vector<glm::vec4> getFrustumCornersWorldSpace(const glm::mat4& proj, const glm::mat4& view);
+glm::mat4 compute_light_space_matrix(const glm::mat4& proj, const glm::mat4& view, const glm::vec4& lightDir);
+
 // Frustum culling
 bool is_visible(const RenderObject& obj, const glm::mat4& viewproj) {
-    std::array<glm::vec3, 8> corners{
-        glm::vec3 { 1, 1, 1 },
-        glm::vec3 { 1, 1, -1 },
-        glm::vec3 { 1, -1, 1 },
-        glm::vec3 { 1, -1, -1 },
-        glm::vec3 { -1, 1, 1 },
-        glm::vec3 { -1, 1, -1 },
-        glm::vec3 { -1, -1, 1 },
-        glm::vec3 { -1, -1, -1 },
+    // Local AABB corners
+    const glm::vec3 c[8] = {
+        { 1,  1,  1}, { 1,  1, -1}, { 1, -1,  1}, { 1, -1, -1},
+        {-1,  1,  1}, {-1,  1, -1}, {-1, -1,  1}, {-1, -1, -1},
     };
 
-    glm::mat4 matrix = viewproj * obj.transform;
+    glm::mat4 M = obj.transform;
+    glm::mat4 VP = viewproj;
 
-    glm::vec3 min = { 1.5, 1.5, 1.5 };
-    glm::vec3 max = { -1.5, -1.5, -1.5 };
-
-    for (int c = 0; c < 8; c++) {
-        // project each corner into clip space
-        glm::vec4 v = matrix * glm::vec4(obj.bounds.origin + (corners[c] * obj.bounds.extents), 1.f);
-
-        // perspective correction
-        v.x = v.x / v.w;
-        v.y = v.y / v.w;
-        v.z = v.z / v.w;
-
-        min = glm::min(glm::vec3{ v.x, v.y, v.z }, min);
-        max = glm::max(glm::vec3{ v.x, v.y, v.z }, max);
+    glm::vec4 v[8];
+    for (int i = 0; i < 8; ++i) {
+        glm::vec3 p = obj.bounds.origin + (c[i] * obj.bounds.extents); // local AABB -> local point
+        v[i] = VP * (M * glm::vec4(p, 1.0f)); // world -> clip
     }
 
-    // check the clip space box is within the view
-    if (min.z > 1.f || max.z < 0.f || min.x > 1.f || max.x < -1.f || min.y > 1.f || max.y < -1.f) {
-        return false;
-    }
-    else {
+    auto outside_all = [&](auto pred) {
+        for (int i = 0; i < 8; ++i) if (!pred(v[i])) return false;
         return true;
-    }
+    };
+
+    // Left
+    if (outside_all([](const glm::vec4& q) { return q.x < -q.w; })) return false;
+    if (outside_all([](const glm::vec4& q) { return q.x > q.w; })) return false;
+
+    // Bottom
+    if (outside_all([](const glm::vec4& q) { return q.y < -q.w; })) return false;
+    if (outside_all([](const glm::vec4& q) { return q.y > q.w; })) return false;
+
+    // Near/Far depend on clip-space convention:
+    if (outside_all([](const glm::vec4& q) { return q.z < 0.0f; })) return false; // near
+    if (outside_all([](const glm::vec4& q) { return q.z > q.w;   })) return false; // far
+
+    // Not outside any plane
+    return true;
 }
 
 void VulkanEngine::destroy_image(const AllocatedImage& img) {
@@ -759,7 +760,7 @@ void VulkanEngine::init_swapchain() {
         1
     };
 
-    //hardcoding the draw format to 32 bit float
+    // hardcoding the draw format to 16 bit float
     _drawImage.imageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
     _drawImage.imageExtent = drawImageExtent;
 
@@ -906,7 +907,7 @@ void VulkanEngine::init() {
     // snow
     // metro
     // winter_evening_4k
-    _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\winter_evening_4k.hdr", 1024, true); 
+    _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\kloofendal_48d_partly_cloudy_puresky_4k.hdr", 1024, true); 
 
     init_irradiance_cubemap_pipeline();
     _ibl.irradiancemap = generate_irradiance_map_from_cubemap(1024, true);
@@ -919,7 +920,11 @@ void VulkanEngine::init() {
 
     init_ibl_descriptor_set();
 
+    init_shadow_mapping_pipeline();
+    init_shadow_mapping_descriptor_set();
+
     init_pipelines();
+
     init_imgui();
     init_default_data();
 
@@ -933,8 +938,9 @@ void VulkanEngine::init() {
     assert(helmetFile.has_value());
     loadedScenes["DamagedHelmet"] = *helmetFile;
 
-    //std::string bistroPath = { "..\\..\\assets\\Bistro_Godot.glb" };
-    std::string bistroPath = { "..\\..\\assets\\Sponza\\Sponza.gltf" };
+    //std::string bistroPath = { "..\\..\\assets\\shadow.glb" };
+    std::string bistroPath = { "..\\..\\assets\\Bistro.glb" };
+    //std::string bistroPath = { "..\\..\\assets\\Sponza\\Sponza.gltf" };
     auto bistroFile = loadGltf(this, bistroPath);
     assert(bistroFile.has_value());
     loadedScenes["Bistro"] = *bistroFile;
@@ -991,12 +997,26 @@ void VulkanEngine::update_scene() {
 
     mainCamera.update(deltaTime);
     sceneData.view = mainCamera.getViewMatrix();
-    sceneData.proj = glm::perspective(glm::radians(70.f), (float)_windowExtent.width / (float)_windowExtent.height, 10000.f, 0.1f);
+    float near = 0.1;
+    float far = 100.0;
+    sceneData.proj = glm::perspective(glm::radians(70.f), (float)_windowExtent.width / (float)_windowExtent.height, far, near);
     sceneData.proj[1][1] *= -1;
     sceneData.viewproj = sceneData.proj * sceneData.view;
     sceneData.ambientColor = glm::vec4(.1f);
-    sceneData.sunlightColor = glm::vec4(1.f);
-    sceneData.sunlightDirection = glm::vec4(0, 1, 0.5, 1.f);
+    sceneData.sunlightColor = glm::vec4(lightColor, lightIntensity);
+
+    float s = std::sin(mZenith);
+    glm::vec3 sunDir = glm::normalize(glm::vec3(
+        s * std::cos(mAzimuth),
+        std::cos(mZenith),
+        s * std::sin(mAzimuth)
+    ));
+    sceneData.sunlightDirection = glm::vec4(sunDir, 0.0f);
+
+    glm::mat4 lightSpaceMatrix = compute_light_space_matrix(sceneData.proj, sceneData.view, sceneData.sunlightDirection);
+    
+    _shadowRes.data = GPUShadowMapData{ .lightSpaceMatrix = lightSpaceMatrix };
+    sceneData.lightSpaceMatrix = lightSpaceMatrix;
 
     auto end = std::chrono::system_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -1035,6 +1055,75 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     // and then our opaque_draws would be something like 20 bits draw index, and 44 bits for sort key/hash.
     // That way would be faster than this as it can be sorted through faster methods"
 
+    VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
+
+    auto drawShadowPrepass = [&](const RenderObject& r) {
+        // rebind index buffer if needed. != operator here is just comparing handles
+        if (r.indexBuffer != lastIndexBuffer) {
+            lastIndexBuffer = r.indexBuffer;
+            vkCmdBindIndexBuffer(cmd, r.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        }
+
+        // calculate final mesh matrix
+        GPUDrawPushConstants push_constants;
+        push_constants.worldMatrix = r.transform;
+        push_constants.vertexBuffer = r.vertexBufferAddress;
+        vkCmdPushConstants(cmd, _shadowRes.prepassPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &push_constants);
+
+        vkCmdDrawIndexed(cmd, r.indexCount, 1, r.firstIndex, 0, 0);
+
+        //stats
+        stats.drawcall_count++;
+        stats.triangle_count += r.indexCount / 3;
+    };
+
+    vkutil::transition_image(cmd, _shadowRes.shadowMap.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+
+    VkRenderingAttachmentInfo shadowAttachment = vkinit::depth_attachment_info(_shadowRes.shadowMap.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    VkRenderingInfo shadowRenderInfo = vkinit::rendering_info(VkExtent2D{ 1024, 1024 }, nullptr, &shadowAttachment);
+    vkCmdBeginRendering(cmd, &shadowRenderInfo);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowRes.prepassPipeline);
+
+    VkViewport shadowViewport = {}; 
+    shadowViewport.x = 0;
+    shadowViewport.y = 0;
+    shadowViewport.width = 1024;
+    shadowViewport.height = 1024;
+    shadowViewport.minDepth = 0.f;
+    shadowViewport.maxDepth = 1.f;
+    vkCmdSetViewport(cmd, 0, 1, &shadowViewport);
+
+    VkRect2D shadowScissor = {};
+    shadowScissor.offset.x = 0;
+    shadowScissor.offset.y = 0;
+    shadowScissor.extent.width = 1024;
+    shadowScissor.extent.height = 1024;
+    vkCmdSetScissor(cmd, 0, 1, &shadowScissor);
+
+    AllocatedBuffer shadowMapUniforms = create_buffer(sizeof(GPUShadowMapData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    GPUShadowMapData* shadowUniformData = (GPUShadowMapData*)shadowMapUniforms.allocation->GetMappedData();
+    *shadowUniformData = _shadowRes.data; // updated in update_scene
+
+    VkDescriptorSet shadowDescriptor = _shadowRes.descriptorAllocator.allocate(_device, _shadowRes.prepassSetLayout);
+    DescriptorWriter shadowWriter;
+    shadowWriter.write_buffer(0, shadowMapUniforms.buffer, sizeof(GPUShadowMapData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+    shadowWriter.update_set(_device, shadowDescriptor);
+
+    get_current_frame()._deletionQueue.push_function([=, this]() {
+        destroy_buffer(shadowMapUniforms);
+    });
+
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowRes.prepassPipelineLayout, 0, 1, &shadowDescriptor, 0, nullptr);
+
+    for (auto& r : mainDrawContext.OpaqueSurfaces) { // indices into OpaqueSurfaces sorted in order to minimize state changes
+        drawShadowPrepass(r);
+    }
+
+    vkCmdEndRendering(cmd);
+
+    vkutil::transition_image(cmd, _shadowRes.shadowMap.image, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
     VkClearValue clearValue = { 0.0, 0.0, 0.0, 0.0 };
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(_drawImage.imageView, &clearValue, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); // begin a render pass connected to our draw image
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(_depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
@@ -1043,6 +1132,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     vkCmdBeginRendering(cmd, &renderInfo);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _skyboxPipeline);
+
     VkViewport viewport = {}; // need to have some pipeline bound before specifying dynamic state. I don't think it matters which here?
     viewport.x = 0;
     viewport.y = 0;
@@ -1051,6 +1141,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     viewport.minDepth = 0.f;
     viewport.maxDepth = 1.f;
     vkCmdSetViewport(cmd, 0, 1, &viewport);
+
     VkRect2D scissor = {};
     scissor.offset.x = 0;
     scissor.offset.y = 0;
@@ -1083,7 +1174,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     // state tracking, used to avoid redundant re-bindings in consecutive calls to `draw` lambda
     MaterialPipeline* lastPipeline = nullptr;
     MaterialInstance* lastMaterial = nullptr;
-    VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
+    lastIndexBuffer = VK_NULL_HANDLE;
 
     auto draw = [&](const RenderObject& r) {
         if (r.material != lastMaterial) { // rebind pipeline and descriptors if the material changed
@@ -1093,6 +1184,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.material->pipeline->pipeline);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.material->pipeline->layout, 0, 1, &globalDescriptor, 0, nullptr);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.material->pipeline->layout, 2, 1, &_ibl.iblSet, 0, nullptr);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.material->pipeline->layout, 3, 1, &_shadowRes.shadowSet, 0, nullptr);
 
                 VkViewport viewport = {};
                 viewport.x = 0;
@@ -1282,6 +1374,29 @@ void VulkanEngine::run() {
         ImGui::Text("draws %i", stats.drawcall_count);
         ImGui::End();
 
+        // Lighting controls
+        ImGui::Begin("Lighting");
+
+        // Sliders shown in degrees, values kept in radians
+        ImGui::SliderAngle("Azimuth", &mAzimuth, -180.0f, 180.0f);
+        ImGui::SliderAngle("Zenith", &mZenith, 0.0f, 180.0f);
+        ImGui::SliderFloat("Distance", &lightDist, 1.0f, 10000.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("Intensity", &lightIntensity, 1.0f, 10000.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+        ImGui::ColorEdit3("Light Color", &lightColor[0]);
+
+        // Spherical (azimuth around Y, zenith from +Y) -> cartesian
+        // y = cos(zenith), radius = sin(zenith)
+        // x = radius * cos(azimuth), z = radius * sin(azimuth)
+        float s = std::sin(mZenith);
+        glm::vec3 sunDir = glm::normalize(glm::vec3(
+            s * std::cos(mAzimuth),   // x
+            std::cos(mZenith),        // y
+            s * std::sin(mAzimuth)    // z
+        ));
+
+        ImGui::Text("dir = [%.3f, %.3f, %.3f]", sunDir.x, sunDir.y, sunDir.z);
+        ImGui::End();
+
         ImGui::Render();
 
         draw();
@@ -1320,9 +1435,9 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine) {
 
     materialLayout = layoutBuilder.build(engine->_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
 
-    VkDescriptorSetLayout layouts[] = { engine->_gpuSceneDataDescriptorLayout, materialLayout, engine->_ibl.iblSetLayout };
+    VkDescriptorSetLayout layouts[] = { engine->_gpuSceneDataDescriptorLayout, materialLayout, engine->_ibl.iblSetLayout, engine->_shadowRes.shadowSetLayout };
     VkPipelineLayoutCreateInfo mesh_layout_info = vkinit::pipeline_layout_create_info();
-    mesh_layout_info.setLayoutCount = 3;
+    mesh_layout_info.setLayoutCount = 4;
     mesh_layout_info.pSetLayouts = layouts;
     mesh_layout_info.pPushConstantRanges = &matrixRange;
     mesh_layout_info.pushConstantRangeCount = 1;
@@ -1437,6 +1552,171 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx) {
 
     // recurse down
     Node::Draw(topMatrix, ctx);
+}
+
+// Shadow mapping
+
+void VulkanEngine::init_shadow_mapping_pipeline() {
+    VkShaderModule shadowFragShader;
+    if (!vkutil::load_shader_module("../../shaders/shadow_map.frag.spv", _device, &shadowFragShader)) {
+        fmt::println("Error when building the shadow mapping fragment shader module");
+    }
+
+    VkShaderModule shadowVertexShader;
+    if (!vkutil::load_shader_module("../../shaders/shadow_map.vert.spv", _device, &shadowVertexShader)) {
+        fmt::println("Error when building the shadow mapping vertex shader module");
+    }
+
+    VkPushConstantRange matrixRange{};
+    matrixRange.offset = 0;
+    matrixRange.size = sizeof(GPUDrawPushConstants); // model matrix, vertex buffer device address (i.e. vertex pulling)
+    matrixRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+    DescriptorLayoutBuilder b;
+    b.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+    _shadowRes.prepassSetLayout = b.build(_device, VK_SHADER_STAGE_VERTEX_BIT);
+
+    {
+        DescriptorAllocatorGrowable::PoolSizeRatio sizes[] = {
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8.0f },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8.0f }
+        };
+        _shadowRes.descriptorAllocator = DescriptorAllocatorGrowable{};
+        _shadowRes.descriptorAllocator.init(_device, 64, std::span(sizes));
+        _shadowRes.prepassSet = _shadowRes.descriptorAllocator.allocate(_device, _shadowRes.prepassSetLayout);
+    }
+
+    VkDescriptorSetLayout layouts[] = { _shadowRes.prepassSetLayout };
+    VkPipelineLayoutCreateInfo mesh_layout_info = vkinit::pipeline_layout_create_info();
+    mesh_layout_info.setLayoutCount = 1;
+    mesh_layout_info.pSetLayouts = layouts;
+    mesh_layout_info.pPushConstantRanges = &matrixRange;
+    mesh_layout_info.pushConstantRangeCount = 1;
+
+    VkPipelineLayout newLayout;
+    VK_CHECK(vkCreatePipelineLayout(_device, &mesh_layout_info, nullptr, &newLayout));
+
+    _shadowRes.prepassPipelineLayout = newLayout;
+
+    // build the stage-create-info for both vertex and fragment stages. This lets
+    // the pipeline know the shader modules per stage
+    PipelineBuilder pipelineBuilder;
+    pipelineBuilder.set_shaders(shadowVertexShader, shadowFragShader);
+    pipelineBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    pipelineBuilder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    pipelineBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    pipelineBuilder.set_multisampling_none();
+    pipelineBuilder.disable_blending();
+    pipelineBuilder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+
+    // render format
+    _shadowRes.shadowMap = create_image(
+        VkExtent3D{ 1024, 1024, 1 },
+        VK_FORMAT_D32_SFLOAT,
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        false);
+    pipelineBuilder.set_depth_format(_shadowRes.shadowMap.imageFormat);
+    pipelineBuilder.disable_color_attachments();
+
+    // use the triangle layout we created
+    pipelineBuilder._pipelineLayout = newLayout;
+
+    // finally build the pipeline
+    _shadowRes.prepassPipeline = pipelineBuilder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, shadowFragShader, nullptr);
+    vkDestroyShaderModule(_device, shadowVertexShader, nullptr);
+}
+
+void VulkanEngine::init_shadow_mapping_descriptor_set() {
+    DescriptorLayoutBuilder b;
+    b.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // shadow map
+    _shadowRes.shadowSetLayout = b.build(_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+
+    _shadowRes.shadowSet = _shadowRes.descriptorAllocator.allocate(_device, _shadowRes.shadowSetLayout);
+
+    VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    si.magFilter = VK_FILTER_LINEAR; // PCF requires linear filter
+    si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST; 
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+    si.compareEnable = VK_FALSE;
+    si.compareOp = VK_COMPARE_OP_ALWAYS; // check this
+    si.minLod = 0.0f; 
+    si.maxLod = 0.0f;
+    vkCreateSampler(_device, &si, nullptr, &_shadowRes.shadowSampler);
+
+    DescriptorWriter w;
+    w.write_image(0, _shadowRes.shadowMap.imageView, _shadowRes.shadowSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    w.update_set(_device, _shadowRes.shadowSet);
+}
+
+std::vector<glm::vec4> getFrustumCornersWorldSpace(const glm::mat4& proj, const glm::mat4& view) {
+    const auto inv = glm::inverse(proj * view);
+
+    std::vector<glm::vec4> frustumCorners;
+    for (unsigned int x = 0; x < 2; ++x) {
+        for (unsigned int y = 0; y < 2; ++y) {
+            for (unsigned int z = 0; z < 2; ++z) {
+                const glm::vec4 ndc(
+                    x ? 1.f : -1.f,
+                    y ? 1.f : -1.f,
+                    z ? 1.f : 0.f, 
+                    1.f
+                );
+                glm::vec4 world = inv * ndc;
+                frustumCorners.push_back(world / world.w);
+            }
+        }
+    }
+
+    return frustumCorners;
+}
+
+glm::mat4 compute_light_space_matrix(const glm::mat4& proj, const glm::mat4& view, const glm::vec4& lightDir) {
+    std::vector<glm::vec4> frustumCorners = getFrustumCornersWorldSpace(proj, view);
+
+    glm::vec3 center = glm::vec3(0, 0, 0);
+    for (const auto& v : frustumCorners) {
+        center += glm::vec3(v);
+    }
+    center /= frustumCorners.size();
+    const auto lightView = glm::lookAt(
+        center - (glm::vec3(lightDir)),
+        center,
+        glm::vec3(0.0f, 1.0f, 0.0f)
+    );
+
+    float minX = FLT_MAX, minY = FLT_MAX, minZ = FLT_MAX;
+    float maxX = -FLT_MAX, maxY = -FLT_MAX, maxZ = -FLT_MAX;
+    for (const auto& c : frustumCorners) {
+        glm::vec4 lc = lightView * c;
+        minX = std::min(minX, lc.x); maxX = std::max(maxX, lc.x);
+        minY = std::min(minY, lc.y); maxY = std::max(maxY, lc.y);
+        minZ = std::min(minZ, lc.z); maxZ = std::max(maxZ, lc.z);
+    }
+
+    constexpr float zMult = 10.0f; // Tune this parameter according to the scene
+    if (minZ < 0) {
+        minZ *= zMult;
+    } 
+    else {
+        minZ /= zMult;
+    }
+    if (maxZ < 0) {
+        maxZ /= zMult;
+    }
+    else {
+        maxZ *= zMult;
+    }
+
+    glm::mat4 lightProjection = glm::ortho(minX, maxX, minY, maxY, minZ, maxZ);
+    lightProjection[1][1] *= -1.f;
+
+    glm::mat4 lightSpaceMatrix = lightProjection * lightView;
+
+    return lightSpaceMatrix;
 }
 
 // IBL

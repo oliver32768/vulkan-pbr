@@ -23,9 +23,30 @@ void Camera::processSDLEvent(SDL_Event& e) {
         velocity.z *= inv;
     }
 
-    if (e.type == SDL_MOUSEMOTION) {
-        yaw += (float)e.motion.xrel / 200.f;
-        pitch -= (float)e.motion.yrel / 200.f;
+    // Handle RMB press/release
+    if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT) {
+        rotateHeld = true;
+        SDL_SetRelativeMouseMode(SDL_TRUE);   // lock cursor & get unbounded xrel/yrel
+        SDL_CaptureMouse(SDL_TRUE);           // keep events even if cursor leaves window
+    }
+    else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_RIGHT) {
+        rotateHeld = false;
+        SDL_SetRelativeMouseMode(SDL_FALSE);
+        SDL_CaptureMouse(SDL_FALSE);
+    }
+
+    // Only rotate while RMB is held
+    if (e.type == SDL_MOUSEMOTION && rotateHeld) {
+        yaw += static_cast<float>(e.motion.xrel) / 200.f;
+        pitch -= static_cast<float>(e.motion.yrel) / 200.f;
+
+        // Clamp pitch so we can't look past the poles
+        const float maxPitch = glm::radians(89.0f);
+        pitch = glm::clamp(pitch, -maxPitch, maxPitch);
+
+        // (Optional) wrap yaw to avoid float blow-up over time
+        if (yaw > glm::pi<float>()) yaw -= glm::two_pi<float>();
+        if (yaw < -glm::pi<float>()) yaw += glm::two_pi<float>();
     }
 }
 

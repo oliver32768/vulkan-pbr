@@ -29,6 +29,7 @@ public:
     void enable_depthtest(bool depthWriteEnable, VkCompareOp op);
     void disable_depthtest();
     void set_color_attachment_format(VkFormat format);
+    void disable_color_attachments();
     void set_depth_format(VkFormat format);
     void disable_blending();
     void set_multisampling_none();
