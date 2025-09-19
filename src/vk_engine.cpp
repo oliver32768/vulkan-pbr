@@ -33,7 +33,92 @@ uint32_t MAX_MIPS = 15;
 VulkanEngine* loadedEngine = nullptr;
 
 std::vector<glm::vec4> getFrustumCornersWorldSpace(const glm::mat4& proj, const glm::mat4& view);
-glm::mat4 compute_light_space_matrix(const glm::mat4& proj, const glm::mat4& view, const glm::vec4& lightDir);
+
+static inline bool is_depth_format(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_D16_UNORM:
+    case VK_FORMAT_X8_D24_UNORM_PACK32:
+    case VK_FORMAT_D32_SFLOAT:
+    case VK_FORMAT_D16_UNORM_S8_UINT:
+    case VK_FORMAT_D24_UNORM_S8_UINT:
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:
+        return true;
+    default: return false;
+    }
+}
+
+static inline bool has_stencil(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_D16_UNORM_S8_UINT:
+    case VK_FORMAT_D24_UNORM_S8_UINT:
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:
+        return true;
+    default: return false;
+    }
+}
+
+static VkImageAspectFlags aspect_for_format(VkFormat format) {
+    if (!is_depth_format(format)) return VK_IMAGE_ASPECT_COLOR_BIT;
+    return has_stencil(format) ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) 
+        : VK_IMAGE_ASPECT_DEPTH_BIT;
+}
+
+// Create an image-view with full control over type/layers/mips
+VkImageView VulkanEngine::create_view(VkImage image, VkFormat format, VkImageAspectFlags aspect,
+    VkImageViewType type,
+    uint32_t baseMip, uint32_t mipCount,
+    uint32_t baseLayer, uint32_t layerCount)
+{
+    VkImageViewCreateInfo vi = vkinit::imageview_create_info(format, image, aspect);
+    vi.viewType = type;
+    vi.subresourceRange.baseMipLevel = baseMip;
+    vi.subresourceRange.levelCount = mipCount;
+    vi.subresourceRange.baseArrayLayer = baseLayer;
+    vi.subresourceRange.layerCount = layerCount;
+
+    VkImageView view;
+    VK_CHECK(vkCreateImageView(_device, &vi, nullptr, &view));
+    return view;
+}
+
+AllocatedImage VulkanEngine::create_image(VkExtent3D size,
+    VkFormat format,
+    VkImageUsageFlags usage,
+    bool mipmapped,
+    uint32_t arrayLayers,
+    VkImageViewType viewType,
+    VkImageCreateFlags flags /*=0*/,
+    VkSampleCountFlagBits samples /*=VK_SAMPLE_COUNT_1_BIT*/)
+{
+    AllocatedImage img{};
+    img.imageFormat = format;
+    img.imageExtent = size;
+
+    // Base image info
+    VkImageCreateInfo ii = vkinit::image_create_info(format, usage, size);
+    ii.flags = flags;
+    ii.samples = samples;
+    ii.arrayLayers = std::max(1u, arrayLayers);
+    ii.imageType = (size.depth > 1 && viewType == VK_IMAGE_VIEW_TYPE_3D) ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+    ii.tiling = VK_IMAGE_TILING_OPTIMAL; // as before
+
+    if (mipmapped) {
+        const uint32_t maxDim = std::max(size.width, size.height);
+        ii.mipLevels = std::max(1u, static_cast<uint32_t>(std::floor(std::log2(maxDim))) + 1);
+    }
+
+    // Allocate with VMA
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    aci.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    VK_CHECK(vmaCreateImage(_allocator, &ii, &aci, &img.image, &img.allocation, nullptr));
+
+    // Aspect + default view (spans all mips and all array layers)
+    const VkImageAspectFlags aspect = aspect_for_format(format);
+    img.imageView = create_view(img.image, format, aspect, viewType, 0, ii.mipLevels, 0, ii.arrayLayers);
+
+    return img;
+}
 
 // Frustum culling
 bool is_visible(const RenderObject& obj, const glm::mat4& viewproj) {
@@ -1013,10 +1098,18 @@ void VulkanEngine::update_scene() {
     ));
     sceneData.sunlightDirection = glm::vec4(sunDir, 0.0f);
 
-    glm::mat4 lightSpaceMatrix = compute_light_space_matrix(sceneData.proj, sceneData.view, sceneData.sunlightDirection);
+    _shadowRes.cascadePlanes = { near, far / 50.0f, far / 25.0f, far / 10.0f, far / 2.0f, far };
+
+    std::vector<glm::mat4> cascades = getLightSpaceMatrices(_shadowRes.numCascades, _shadowRes.cascadePlanes, near, far, sceneData.view, sceneData.sunlightDirection);
+
+    std::vector<GPUShadowMapData> cascadeData{};
+    for (int i = 0; i < cascades.size(); ++i) {
+        glm::mat4 m = cascades[i];
+        GPUShadowMapData data{ .lightSpaceMatrix = m };
+        cascadeData.push_back(data);
+    }
     
-    _shadowRes.data = GPUShadowMapData{ .lightSpaceMatrix = lightSpaceMatrix };
-    sceneData.lightSpaceMatrix = lightSpaceMatrix;
+    _shadowRes.dataPerCascade = cascadeData;
 
     auto end = std::chrono::system_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -1057,6 +1150,20 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 
     VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
 
+    VkViewport shadowViewport = {};
+    shadowViewport.x = 0;
+    shadowViewport.y = 0;
+    shadowViewport.width = 1024;
+    shadowViewport.height = 1024;
+    shadowViewport.minDepth = 0.f;
+    shadowViewport.maxDepth = 1.f;
+
+    VkRect2D shadowScissor = {};
+    shadowScissor.offset.x = 0;
+    shadowScissor.offset.y = 0;
+    shadowScissor.extent.width = 1024;
+    shadowScissor.extent.height = 1024;
+
     auto drawShadowPrepass = [&](const RenderObject& r) {
         // rebind index buffer if needed. != operator here is just comparing handles
         if (r.indexBuffer != lastIndexBuffer) {
@@ -1079,48 +1186,45 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 
     vkutil::transition_image(cmd, _shadowRes.shadowMap.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
-    VkRenderingAttachmentInfo shadowAttachment = vkinit::depth_attachment_info(_shadowRes.shadowMap.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
-    VkRenderingInfo shadowRenderInfo = vkinit::rendering_info(VkExtent2D{ 1024, 1024 }, nullptr, &shadowAttachment);
-    vkCmdBeginRendering(cmd, &shadowRenderInfo);
+    // For each cascade:
+    for (uint32_t c = 0; c < _shadowRes.numCascades; ++c) {
+        // Begin rendering to layer c
+        VkRenderingAttachmentInfo depthAtt = vkinit::depth_attachment_info(_shadowRes.layerViews[c], VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        VkRenderingInfo ri = vkinit::rendering_info(VkExtent2D{ 1024, 1024 }, nullptr, &depthAtt);
+        ri.layerCount = 1; // we're using a 2D view anyway
+        vkCmdBeginRendering(cmd, &ri);
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowRes.prepassPipeline);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowRes.prepassPipeline);
 
-    VkViewport shadowViewport = {}; 
-    shadowViewport.x = 0;
-    shadowViewport.y = 0;
-    shadowViewport.width = 1024;
-    shadowViewport.height = 1024;
-    shadowViewport.minDepth = 0.f;
-    shadowViewport.maxDepth = 1.f;
-    vkCmdSetViewport(cmd, 0, 1, &shadowViewport);
+        vkCmdSetViewport(cmd, 0, 1, &shadowViewport);
+        vkCmdSetScissor(cmd, 0, 1, &shadowScissor);
 
-    VkRect2D shadowScissor = {};
-    shadowScissor.offset.x = 0;
-    shadowScissor.offset.y = 0;
-    shadowScissor.extent.width = 1024;
-    shadowScissor.extent.height = 1024;
-    vkCmdSetScissor(cmd, 0, 1, &shadowScissor);
+        // Update the prepass UBO for this cascade (light VP for cascade c)
+        AllocatedBuffer shadowMapUniforms = create_buffer(sizeof(GPUShadowMapData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 
-    AllocatedBuffer shadowMapUniforms = create_buffer(sizeof(GPUShadowMapData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    GPUShadowMapData* shadowUniformData = (GPUShadowMapData*)shadowMapUniforms.allocation->GetMappedData();
-    *shadowUniformData = _shadowRes.data; // updated in update_scene
+        GPUShadowMapData* u = (GPUShadowMapData*)shadowMapUniforms.allocation->GetMappedData();
+        *u = _shadowRes.dataPerCascade[c]; // light VP for this cascade
 
-    VkDescriptorSet shadowDescriptor = _shadowRes.descriptorAllocator.allocate(_device, _shadowRes.prepassSetLayout);
-    DescriptorWriter shadowWriter;
-    shadowWriter.write_buffer(0, shadowMapUniforms.buffer, sizeof(GPUShadowMapData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-    shadowWriter.update_set(_device, shadowDescriptor);
+        VkDescriptorSet shadowDescriptor = _shadowRes.descriptorAllocator.allocate(_device, _shadowRes.prepassSetLayout);
+        DescriptorWriter shadowWriter;
+        shadowWriter.write_buffer(0, shadowMapUniforms.buffer, sizeof(GPUShadowMapData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        shadowWriter.update_set(_device, shadowDescriptor);
 
-    get_current_frame()._deletionQueue.push_function([=, this]() {
-        destroy_buffer(shadowMapUniforms);
-    });
+        get_current_frame()._deletionQueue.push_function([=, this]() {
+            destroy_buffer(shadowMapUniforms);
+        });
 
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowRes.prepassPipelineLayout, 0, 1, &shadowDescriptor, 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowRes.prepassPipelineLayout, 0, 1, &shadowDescriptor, 0, nullptr);
 
-    for (auto& r : mainDrawContext.OpaqueSurfaces) { // indices into OpaqueSurfaces sorted in order to minimize state changes
-        drawShadowPrepass(r);
+        // depth bias per cascade
+        //vkCmdSetDepthBias(cmd, constBias, slopeBias, clamp);
+
+        for (auto& r : mainDrawContext.OpaqueSurfaces) {
+            drawShadowPrepass(r);
+        }
+
+        vkCmdEndRendering(cmd);
     }
-
-    vkCmdEndRendering(cmd);
 
     vkutil::transition_image(cmd, _shadowRes.shadowMap.image, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
@@ -1154,9 +1258,13 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     GPUSceneData* sceneUniformData = (GPUSceneData*)gpuSceneDataBuffer.allocation->GetMappedData();
     *sceneUniformData = sceneData;
     VkDescriptorSet globalDescriptor = get_current_frame()._frameDescriptors.allocate(_device, _gpuSceneDataDescriptorLayout);
-    DescriptorWriter writer;
-    writer.write_buffer(0, gpuSceneDataBuffer.buffer, sizeof(GPUSceneData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-    writer.update_set(_device, globalDescriptor);
+
+    {
+        DescriptorWriter writer;
+        writer.write_buffer(0, gpuSceneDataBuffer.buffer, sizeof(GPUSceneData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        writer.update_set(_device, globalDescriptor);
+    }
+
     get_current_frame()._deletionQueue.push_function([=, this]() {
         destroy_buffer(gpuSceneDataBuffer);
     });
@@ -1170,6 +1278,30 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 
         vkCmdDraw(cmd, 3, 1, 0, 0);
     }
+
+    // Cascades data
+    AllocatedBuffer gpuCascadesBuffer = create_buffer(sizeof(GPUShadowCascades), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+
+    auto* csmUBO = reinterpret_cast<GPUShadowCascades*>(gpuCascadesBuffer.allocation->GetMappedData());
+    for (uint32_t i = 0; i < NUM_CASCADES; ++i) {
+        csmUBO->lightViewProj[i] = _shadowRes.dataPerCascade[i].lightSpaceMatrix;
+    }
+    for (uint32_t i = 0; i <= NUM_CASCADES; ++i) {
+        csmUBO->splitDepths[i].v = _shadowRes.cascadePlanes[i]; // view-space distances
+    }
+
+    _shadowRes.shadowUboSet = _shadowRes.descriptorAllocator.allocate(_device, _shadowRes.shadowUboSetLayout);
+
+    {
+        DescriptorWriter writer;
+        writer.write_buffer(0, gpuCascadesBuffer.buffer, sizeof(GPUShadowCascades), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        writer.update_set(_device, _shadowRes.shadowUboSet);
+    }
+
+    // cleanup later this frame
+    get_current_frame()._deletionQueue.push_function([=, this] {
+        destroy_buffer(gpuCascadesBuffer);
+    });
 
     // state tracking, used to avoid redundant re-bindings in consecutive calls to `draw` lambda
     MaterialPipeline* lastPipeline = nullptr;
@@ -1185,6 +1317,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.material->pipeline->layout, 0, 1, &globalDescriptor, 0, nullptr);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.material->pipeline->layout, 2, 1, &_ibl.iblSet, 0, nullptr);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.material->pipeline->layout, 3, 1, &_shadowRes.shadowSet, 0, nullptr);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.material->pipeline->layout, 4, 1, &_shadowRes.shadowUboSet, 0, nullptr);
 
                 VkViewport viewport = {};
                 viewport.x = 0;
@@ -1435,9 +1568,15 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine) {
 
     materialLayout = layoutBuilder.build(engine->_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
 
-    VkDescriptorSetLayout layouts[] = { engine->_gpuSceneDataDescriptorLayout, materialLayout, engine->_ibl.iblSetLayout, engine->_shadowRes.shadowSetLayout };
+    VkDescriptorSetLayout layouts[] = { 
+        engine->_gpuSceneDataDescriptorLayout, 
+        materialLayout,
+        engine->_ibl.iblSetLayout, 
+        engine->_shadowRes.shadowSetLayout, 
+        engine->_shadowRes.shadowUboSetLayout  
+    };
     VkPipelineLayoutCreateInfo mesh_layout_info = vkinit::pipeline_layout_create_info();
-    mesh_layout_info.setLayoutCount = 4;
+    mesh_layout_info.setLayoutCount = 5;
     mesh_layout_info.pSetLayouts = layouts;
     mesh_layout_info.pPushConstantRanges = &matrixRange;
     mesh_layout_info.pushConstantRangeCount = 1;
@@ -1610,11 +1749,24 @@ void VulkanEngine::init_shadow_mapping_pipeline() {
     pipelineBuilder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
 
     // render format
+    _shadowRes.numCascades = NUM_CASCADES;
     _shadowRes.shadowMap = create_image(
         VkExtent3D{ 1024, 1024, 1 },
         VK_FORMAT_D32_SFLOAT,
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        false);
+        false,
+        NUM_CASCADES,
+        VK_IMAGE_VIEW_TYPE_2D_ARRAY
+    );
+
+    // Create individual image views into each layer so we can render into them during shadow prepass
+    // .shadowMap.imageView is a view into a 2d array, i.e. a sampler2DArray. we can't use that as a rendering attachment
+    auto aspect = VK_IMAGE_ASPECT_DEPTH_BIT; 
+    _shadowRes.layerViews.resize(NUM_CASCADES);
+    for (uint32_t i = 0; i < NUM_CASCADES; ++i) {
+        _shadowRes.layerViews[i] = create_view(_shadowRes.shadowMap.image, _shadowRes.shadowMap.imageFormat, aspect, VK_IMAGE_VIEW_TYPE_2D, 0, 1, i, 1);
+    }
+
     pipelineBuilder.set_depth_format(_shadowRes.shadowMap.imageFormat);
     pipelineBuilder.disable_color_attachments();
 
@@ -1629,27 +1781,35 @@ void VulkanEngine::init_shadow_mapping_pipeline() {
 }
 
 void VulkanEngine::init_shadow_mapping_descriptor_set() {
-    DescriptorLayoutBuilder b;
-    b.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // shadow map
-    _shadowRes.shadowSetLayout = b.build(_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+    {
+        DescriptorLayoutBuilder b;
+        b.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // shadow map
+        _shadowRes.shadowSetLayout = b.build(_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
 
-    _shadowRes.shadowSet = _shadowRes.descriptorAllocator.allocate(_device, _shadowRes.shadowSetLayout);
+        _shadowRes.shadowSet = _shadowRes.descriptorAllocator.allocate(_device, _shadowRes.shadowSetLayout);
 
-    VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-    si.magFilter = VK_FILTER_LINEAR; // PCF requires linear filter
-    si.minFilter = VK_FILTER_LINEAR;
-    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST; 
-    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-    si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
-    si.compareEnable = VK_FALSE;
-    si.compareOp = VK_COMPARE_OP_ALWAYS; // check this
-    si.minLod = 0.0f; 
-    si.maxLod = 0.0f;
-    vkCreateSampler(_device, &si, nullptr, &_shadowRes.shadowSampler);
+        VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        si.magFilter = VK_FILTER_LINEAR; // PCF requires linear filter
+        si.minFilter = VK_FILTER_LINEAR;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+        si.compareEnable = VK_FALSE;
+        si.compareOp = VK_COMPARE_OP_ALWAYS; // check this
+        si.minLod = 0.0f;
+        si.maxLod = 0.0f;
+        vkCreateSampler(_device, &si, nullptr, &_shadowRes.shadowSampler);
 
-    DescriptorWriter w;
-    w.write_image(0, _shadowRes.shadowMap.imageView, _shadowRes.shadowSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-    w.update_set(_device, _shadowRes.shadowSet);
+        DescriptorWriter w;
+        w.write_image(0, _shadowRes.shadowMap.imageView, _shadowRes.shadowSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        w.update_set(_device, _shadowRes.shadowSet);
+    }
+
+    {
+        DescriptorLayoutBuilder b;
+        b.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER); // shadow map
+        _shadowRes.shadowUboSetLayout = b.build(_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+    }
 }
 
 std::vector<glm::vec4> getFrustumCornersWorldSpace(const glm::mat4& proj, const glm::mat4& view) {
@@ -1674,7 +1834,9 @@ std::vector<glm::vec4> getFrustumCornersWorldSpace(const glm::mat4& proj, const 
     return frustumCorners;
 }
 
-glm::mat4 compute_light_space_matrix(const glm::mat4& proj, const glm::mat4& view, const glm::vec4& lightDir) {
+glm::mat4 VulkanEngine::compute_light_space_matrix(float near, float far, const glm::mat4& view, const glm::vec4& lightDir) {
+    glm::mat4 proj = glm::perspective(glm::radians(70.f), (float)_windowExtent.width / (float)_windowExtent.height, far, near);
+
     std::vector<glm::vec4> frustumCorners = getFrustumCornersWorldSpace(proj, view);
 
     glm::vec3 center = glm::vec3(0, 0, 0);
@@ -1717,6 +1879,19 @@ glm::mat4 compute_light_space_matrix(const glm::mat4& proj, const glm::mat4& vie
     glm::mat4 lightSpaceMatrix = lightProjection * lightView;
 
     return lightSpaceMatrix;
+}
+
+std::vector<glm::mat4> VulkanEngine::getLightSpaceMatrices(uint32_t num_cascades, const std::vector<float>& cascade_planes, float near_plane, float far_plane, const glm::mat4& view, const glm::vec4& lightDir) {
+    assert(cascade_planes.size() == num_cascades + 1);
+    std::vector<glm::mat4> ret;
+    ret.reserve(num_cascades);
+
+    for (uint32_t i = 0; i < num_cascades; ++i) {
+        float n = cascade_planes[i];
+        float f = cascade_planes[i + 1];
+        ret.emplace_back(compute_light_space_matrix(n, f, view, lightDir));
+    }
+    return ret;
 }
 
 // IBL

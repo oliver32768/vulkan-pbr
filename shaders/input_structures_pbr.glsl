@@ -5,7 +5,6 @@ layout(set = 0, binding = 0) uniform SceneData {
 	vec4 ambientColor;
 	vec4 sunlightDirection; // w for sun power
 	vec4 sunlightColor;
-	mat4 lightSpaceMatrix;
 } sceneData;
 
 layout(set = 1, binding = 0) uniform GLTFMaterialData {
@@ -24,4 +23,11 @@ layout(set = 2, binding = 1) uniform samplerCube uIrradiance;
 layout(set = 2, binding = 2) uniform samplerCube uPrefiltered;
 layout(set = 2, binding = 3) uniform sampler2D uBrdfLUT;
 
-layout(set = 3, binding = 0) uniform sampler2D uShadowMap;
+layout(set = 3, binding = 0) uniform sampler2DArray uShadowMap;
+
+#define NUM_CASCADES 5
+
+layout(set = 4, binding = 0) uniform Cascades {
+	mat4 lightViewProj[NUM_CASCADES]; // world -> light clip per cascade
+	float splitDepths[NUM_CASCADES + 1]; // view-space split planes (near..far)
+} csm;

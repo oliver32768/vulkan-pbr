@@ -7,7 +7,6 @@ layout (location = 0) in vec3 vWorldPos;
 layout (location = 1) in vec3 vWorldNormal;
 layout (location = 2) in vec2 vUV;
 layout (location = 3) in vec3 vVertexColor;
-layout (location = 4) in vec4 vFragPosLightSpace;
 
 layout (location = 0) out vec4 outFragColor;
 
@@ -78,26 +77,37 @@ vec3 ACESFilm(vec3 x) {
     return clamp((x*(a*x + b)) / (x*(c*x + d) + e), 0.0, 1.0);
 }
 
-float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
-    vec3 projCoords = vFragPosLightSpace.xyz / vFragPosLightSpace.w;
+int selectCascade(float z) {
+    // csm.splitDepths = [znear, s1, ..., zfar] in the SAME space as vViewDepth
+    for (int i = 0; i < NUM_CASCADES; ++i) {
+        if (z < csm.splitDepths[i+1]) {
+            return i;
+        }
+    }
+    return NUM_CASCADES - 1;
+}
+
+float ShadowCalculation(vec3 fragPosWorldSpace, vec3 normal, vec3 lightDir) {
+    vec4 fragPosViewSpace = sceneData.view * vec4(fragPosWorldSpace, 1.0);
+    float depthValue = -fragPosViewSpace.z;
+    int layer = selectCascade(depthValue);
+    vec4 fragPosLightSpace = csm.lightViewProj[layer] * vec4(fragPosWorldSpace, 1.0);
+
+    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     vec2 uv = projCoords.xy * 0.5 + 0.5; // map from [-1,1] to [0,1]
     float currentDepth = projCoords.z; // Vulkan NDC z is already [0,1]; don't remap
-    float closestDepth = texture(uShadowMap, uv).r; 
 
-    vec2 texelSize = 1.0 / textureSize(uShadowMap, 0);
+    vec2 texelSize = 1.0 / vec2(textureSize(uShadowMap, 0));
     float bias = GetShadowBias(normalize(normal), normalize(lightDir), texelSize.x);
     float shadow = 0.0;
-    for(int x = -1; x <= 1; ++x)
-    {
-        for(int y = -1; y <= 1; ++y)
-        {
-            float pcfDepth = texture(uShadowMap, uv + vec2(x, y) * texelSize).r; 
+    for(int x = -1; x <= 1; ++x) {
+        for(int y = -1; y <= 1; ++y) {
+            //float pcfDepth = texture(uShadowMap, uv + vec2(x, y) * texelSize).r; 
+            float pcfDepth = texture(uShadowMap,  vec3(uv + vec2(x, y) * texelSize, layer)).r; 
             shadow += (currentDepth + bias) < pcfDepth ? 1.0 : 0.0;     
         }    
     }
     shadow /= 9.0;
-
-    //float shadow = (currentDepth + bias) < closestDepth ? 1.0 : 0.0; // reverse z
 
     if (projCoords.z > 1.0) { 
         shadow = 0.0; 
@@ -183,9 +193,11 @@ void main() {
     vec3 ambient = (kD_ibl * diffuse + specular) * ao; 
 
     // --- Shadow Mapping ---
-    float shadow = ShadowCalculation(vFragPosLightSpace, normalize(vWorldNormal), L); // use geometric normal?
-
+    float shadow = ShadowCalculation(vWorldPos, normalize(vWorldNormal), L); // use geometric normal?
     vec3 color = emissive + ambient + ((1.0 - shadow) * direct);
+    //vec3 color = emissive + ambient + direct;
+
+    //vec4 fragPosViewSpace = sceneData.view * vec4(vWorldPos, 1.0);
 
     outFragColor = vec4(color, alphaOut);
 

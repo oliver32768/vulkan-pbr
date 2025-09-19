@@ -99,8 +99,22 @@ struct GPUSceneData {
 	glm::vec4 ambientColor;
 	glm::vec4 sunlightDirection; // w for sun power
 	glm::vec4 sunlightColor;
-	glm::mat4 lightSpaceMatrix;
 };
+
+constexpr uint32_t NUM_CASCADES = 5;
+
+struct Std140Float {
+	float v;       // value
+	float _pad[3]; // pad to 16B
+};
+static_assert(sizeof(Std140Float) == 16);
+
+struct GPUShadowCascades {
+	glm::mat4 lightViewProj[NUM_CASCADES];
+	Std140Float splitDepths[NUM_CASCADES + 1]; // std140 stride 16
+};
+static_assert(sizeof(glm::mat4) == 64);
+static_assert(sizeof(GPUShadowCascades) == 320 + (NUM_CASCADES + 1) * 16);
 
 struct ComputeEffect {
 	const char* name;
@@ -204,10 +218,14 @@ struct ShadowMappingResources {
 
 	AllocatedImage shadowMap;
 	VkSampler shadowSampler{};
+	std::vector<VkImageView> layerViews;
 
 	// Graphics pipeline
 	VkDescriptorSetLayout shadowSetLayout{};
 	VkDescriptorSet shadowSet{}; 
+
+	VkDescriptorSetLayout shadowUboSetLayout{};
+	VkDescriptorSet shadowUboSet{};
 
 	// Shadow mapping prepass
 	VkDescriptorSetLayout prepassSetLayout{};
@@ -215,7 +233,10 @@ struct ShadowMappingResources {
 	VkPipeline prepassPipeline{};
 	VkDescriptorSet prepassSet{};
 
-	GPUShadowMapData data;
+	std::vector<GPUShadowMapData> dataPerCascade;
+
+	uint32_t numCascades;
+	std::vector<float> cascadePlanes;
 };
 
 class VulkanEngine {
@@ -324,6 +345,10 @@ public:
 
 	void init_shadow_mapping_descriptor_set();
 
+	glm::mat4 compute_light_space_matrix(float, float, const glm::mat4& view, const glm::vec4& lightDir);
+
+	std::vector<glm::mat4> getLightSpaceMatrices(uint32_t num_cascades, const std::vector<float>& cascade_planes, float near_plane, float far_plane, const glm::mat4& view, const glm::vec4& lightDir);
+
 	void init_brdf_integration_pipeline();
 
 	AllocatedImage generate_brdf_lut(uint32_t size, bool mipmapped);
@@ -358,6 +383,8 @@ public:
 
 	AllocatedImage create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
 	AllocatedImage create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
+	VkImageView create_view(VkImage image, VkFormat format, VkImageAspectFlags aspect, VkImageViewType type, uint32_t baseMip, uint32_t mipCount, uint32_t baseLayer, uint32_t layerCount);
+	AllocatedImage create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped, uint32_t arrayLayers, VkImageViewType viewType, VkImageCreateFlags flags = 0, VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
 	void destroy_image(const AllocatedImage& img);
 
 	void update_scene();
