@@ -1056,9 +1056,9 @@ void VulkanEngine::init() {
     init_default_data();
 
     mainCamera.velocity = glm::vec3(0.f);
-    mainCamera.position = glm::vec3(-2.f, 0.5f, 2.f);
-    mainCamera.pitch = -(glm::pi<float>() / 16.0);
-    mainCamera.yaw = glm::pi<float>() / 4.0;
+    mainCamera.position = glm::vec3(-16.15f, 6.09f, -4.58f);
+    mainCamera.pitch = -0.26;
+    mainCamera.yaw = 1.73;
 
     std::string helmetPath = { "..\\..\\assets\\DamagedHelmet.glb" };
     auto helmetFile = loadGltf(this, helmetPath);
@@ -1571,6 +1571,15 @@ void VulkanEngine::run() {
         ));
 
         ImGui::Text("dir = [%.3f, %.3f, %.3f]", sunDir.x, sunDir.y, sunDir.z);
+        ImGui::End();
+
+        ImGui::Begin("Camera");
+        ImGui::Text("Position: X = %.2f, Y = %.2f, Z = %.2f",
+            mainCamera.position.x,
+            mainCamera.position.y,
+            mainCamera.position.z);
+        ImGui::Text("Pitch: %.2f", mainCamera.pitch);
+        ImGui::Text("Yaw:   %.2f", mainCamera.yaw);
         ImGui::End();
 
         ImGui::Render();

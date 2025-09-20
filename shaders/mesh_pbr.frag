@@ -77,6 +77,30 @@ int selectCascade(float z) {
     return NUM_CASCADES - 1;
 }
 
+const vec2 kPoisson16[16] = vec2[](
+  vec2( 0.2853, -0.0588), vec2(-0.1888,  0.2231),
+  vec2(-0.0421, -0.3219), vec2( 0.3458,  0.2309),
+  vec2(-0.3010, -0.1195), vec2( 0.1063,  0.3539),
+  vec2(-0.3567,  0.0847), vec2( 0.0087,  0.1183),
+  vec2( 0.2032, -0.3193), vec2(-0.0796,  0.3586),
+  vec2(-0.2643, -0.3026), vec2( 0.3536, -0.1902),
+  vec2(-0.0063, -0.0318), vec2( 0.1181,  0.1085),
+  vec2(-0.1979, -0.0089), vec2( 0.2670,  0.0174)
+);
+
+// Cheap per-pixel hash -> [0,1)
+float hash12(vec2 p) {
+  // keep it branchless and stable across frames
+  vec3 p3  = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+
+mat2 rot2(float a) {
+  float c = cos(a), s = sin(a);
+  return mat2(c, -s, s, c);
+}
+
 float ShadowCalculation(vec3 fragPosWorldSpace, vec3 normal, vec3 lightDir) {
     vec4 fragPosViewSpace = sceneData.view * vec4(fragPosWorldSpace, 1.0);
     float depthValue = -fragPosViewSpace.z;
@@ -87,22 +111,34 @@ float ShadowCalculation(vec3 fragPosWorldSpace, vec3 normal, vec3 lightDir) {
     vec2 uv = projCoords.xy * 0.5 + 0.5; // map from [-1,1] to [0,1]
     float currentDepth = projCoords.z; // Vulkan NDC z is already [0,1]; don't remap
 
+    if (currentDepth > 1.0) return 0.0;
+
     vec2 texelSize = 1.0 / vec2(textureSize(uShadowMap, 0));
     float bias = GetShadowBias(normalize(normal), normalize(lightDir), texelSize.x);
-    float shadow = 0.0;
-    for(int x = -1; x <= 1; ++x) {
-        for(int y = -1; y <= 1; ++y) {
-            //float pcfDepth = texture(uShadowMap, uv + vec2(x, y) * texelSize).r; 
-            float pcfDepth = texture(uShadowMap,  vec3(uv + vec2(x, y) * texelSize, layer)).r; 
-            shadow += (currentDepth + bias) < pcfDepth ? 1.0 : 0.0;     
-        }    
-    }
-    shadow /= 9.0;
 
-    if (projCoords.z > 1.0) { 
-        shadow = 0.0; 
+    const float pcfRadiusTexels = 2.5;
+    float angle = 6.2831853 * hash12(gl_FragCoord.xy);
+    mat2 R = rot2(angle);
+    float jitter = mix(0.9, 1.1, hash12(gl_FragCoord.yx * 1.37));
+    float sum = 0.0;
+    float wsum = 0.0;
+    vec2 radius = texelSize * (pcfRadiusTexels * jitter);
+
+    for (int i = 0; i < 16; ++i) {
+        vec2 o = R * kPoisson16[i]; // rotate pattern
+        vec2 duv = o * radius; // scale to desired footprint
+
+        float pcfDepth = texture(uShadowMap, vec3(uv + duv, layer)).r;
+
+        // tent weight (closer samples contribute more)
+        float r = length(o); // in [0,1] roughly (unit disk)
+        float w = 1.0 - r; // simple tent; can use smoothstep
+        wsum += w;
+
+        sum += ((currentDepth + bias) < pcfDepth ? 1.0 : 0.0) * w;
     }
 
+    float shadow = sum / max(wsum, 1e-5);
     return shadow;
 }
 
