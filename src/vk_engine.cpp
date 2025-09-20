@@ -10,6 +10,7 @@
 #include "imgui_impl_vulkan.h"
 
 #include <glm/gtx/transform.hpp>
+#include <glm/gtc/epsilon.hpp>
 
 #include <SDL.h>
 #include <SDL_vulkan.h>
@@ -32,7 +33,48 @@ uint32_t MAX_MIPS = 15;
 
 VulkanEngine* loadedEngine = nullptr;
 
-std::vector<glm::vec4> getFrustumCornersWorldSpace(const glm::mat4& proj, const glm::mat4& view);
+// lambda = 0 => uniform, lambda = 1 => logarithmic. Typically 0.6-0.9
+static std::vector<float> buildCascadePlanes(int numCascades, float nearPlane, float farPlane, float lambda) {
+    std::vector<float> planes(numCascades + 1);
+    planes[0] = nearPlane;
+
+    for (int i = 1; i < numCascades; ++i) {
+        float si = float(i) / float(numCascades);
+        float uni = nearPlane + (farPlane - nearPlane) * si; // uniform
+        float log = nearPlane * std::pow(farPlane / nearPlane, si); // logarithmic
+        planes[i] = glm::mix(uni, log, lambda); // blend
+    }
+
+    planes[numCascades] = farPlane;
+    return planes;
+}
+
+static std::array<glm::vec3, 8> frustumCornersWS_fromView(const glm::mat4& view, float fovY_rad, float aspect, float n, float f)
+{
+    // view -> world
+    glm::mat4 invView = glm::inverse(view);
+
+    float tanHalf = std::tan(fovY_rad * 0.5f);
+    float nh = n * tanHalf;
+    float nw = nh * aspect;
+    float fh = f * tanHalf;
+    float fw = fh * aspect;
+
+    // View-space corners (Right-Handed, camera looks -Z)
+    std::array<glm::vec3, 8> vs = {
+        glm::vec3(-nw,  nh, -n), glm::vec3(nw,  nh, -n),
+        glm::vec3(nw, -nh, -n), glm::vec3(-nw, -nh, -n),
+        glm::vec3(-fw,  fh, -f), glm::vec3(fw,  fh, -f),
+        glm::vec3(fw, -fh, -f), glm::vec3(-fw, -fh, -f),
+    };
+
+    std::array<glm::vec3, 8> ws;
+    for (int i = 0; i < 8; ++i) {
+        glm::vec4 w = invView * glm::vec4(vs[i], 1.0f);
+        ws[i] = glm::vec3(w);
+    }
+    return ws;
+}
 
 static inline bool is_depth_format(VkFormat f) {
     switch (f) {
@@ -1098,7 +1140,8 @@ void VulkanEngine::update_scene() {
     ));
     sceneData.sunlightDirection = glm::vec4(sunDir, 0.0f);
 
-    _shadowRes.cascadePlanes = { near, far / 50.0f, far / 25.0f, far / 10.0f, far / 2.0f, far };
+    float lambda = 0.7f;
+    _shadowRes.cascadePlanes = buildCascadePlanes(_shadowRes.numCascades, near, far, lambda);
 
     std::vector<glm::mat4> cascades = getLightSpaceMatrices(_shadowRes.numCascades, _shadowRes.cascadePlanes, near, far, sceneData.view, sceneData.sunlightDirection);
 
@@ -1812,73 +1855,59 @@ void VulkanEngine::init_shadow_mapping_descriptor_set() {
     }
 }
 
-std::vector<glm::vec4> getFrustumCornersWorldSpace(const glm::mat4& proj, const glm::mat4& view) {
-    const auto inv = glm::inverse(proj * view);
+glm::mat4 VulkanEngine::compute_light_space_matrix(float near, float far, const glm::mat4& view, const glm::vec4& lightDir4) {
+    constexpr float fovY = glm::radians(70.f);
+    const float aspect = (float)_windowExtent.width / (float)_windowExtent.height;
 
-    std::vector<glm::vec4> frustumCorners;
-    for (unsigned int x = 0; x < 2; ++x) {
-        for (unsigned int y = 0; y < 2; ++y) {
-            for (unsigned int z = 0; z < 2; ++z) {
-                const glm::vec4 ndc(
-                    x ? 1.f : -1.f,
-                    y ? 1.f : -1.f,
-                    z ? 1.f : 0.f, 
-                    1.f
-                );
-                glm::vec4 world = inv * ndc;
-                frustumCorners.push_back(world / world.w);
-            }
-        }
+    // cascade slice frustum corners
+    auto cornersWS = frustumCornersWS_fromView(view, fovY, aspect, near, far);
+
+    // frustum slice center
+    glm::vec3 center(0.0f);
+    for (auto& c : cornersWS) {
+        center += c;
     }
+    center /= 8.0f;
 
-    return frustumCorners;
-}
+    // shadow map render eye
+    glm::vec3 lightDir = glm::normalize(glm::vec3(lightDir4));
+    glm::vec3 lightPos = center - lightDir;
 
-glm::mat4 VulkanEngine::compute_light_space_matrix(float near, float far, const glm::mat4& view, const glm::vec4& lightDir) {
-    glm::mat4 proj = glm::perspective(glm::radians(70.f), (float)_windowExtent.width / (float)_windowExtent.height, far, near);
+    glm::mat4 lightView = glm::lookAtRH(lightPos, center, glm::vec3(0, 1, 0));
 
-    std::vector<glm::vec4> frustumCorners = getFrustumCornersWorldSpace(proj, view);
-
-    glm::vec3 center = glm::vec3(0, 0, 0);
-    for (const auto& v : frustumCorners) {
-        center += glm::vec3(v);
-    }
-    center /= frustumCorners.size();
-    const auto lightView = glm::lookAt(
-        center - (glm::vec3(lightDir)),
-        center,
-        glm::vec3(0.0f, 1.0f, 0.0f)
-    );
-
+    // fit ortho bounds to frustum slice
     float minX = FLT_MAX, minY = FLT_MAX, minZ = FLT_MAX;
     float maxX = -FLT_MAX, maxY = -FLT_MAX, maxZ = -FLT_MAX;
-    for (const auto& c : frustumCorners) {
-        glm::vec4 lc = lightView * c;
-        minX = std::min(minX, lc.x); maxX = std::max(maxX, lc.x);
-        minY = std::min(minY, lc.y); maxY = std::max(maxY, lc.y);
-        minZ = std::min(minZ, lc.z); maxZ = std::max(maxZ, lc.z);
+    for (auto& c : cornersWS) {
+        glm::vec4 lc = lightView * glm::vec4(c, 1.0f);
+        minX = std::min(minX, lc.x); 
+        maxX = std::max(maxX, lc.x);
+        minY = std::min(minY, lc.y); 
+        maxY = std::max(maxY, lc.y);
+        minZ = std::min(minZ, lc.z); 
+        maxZ = std::max(maxZ, lc.z);
     }
 
-    constexpr float zMult = 10.0f; // Tune this parameter according to the scene
-    if (minZ < 0) {
-        minZ *= zMult;
-    } 
-    else {
-        minZ /= zMult;
-    }
-    if (maxZ < 0) {
-        maxZ /= zMult;
-    }
-    else {
-        maxZ *= zMult;
-    }
+    // stabilize to texel size to reduce shimmering
+    const float mapRes = float(1024); // TODO: variable
+    float worldUnitsPerTexelX = (maxX - minX) / mapRes;
+    float worldUnitsPerTexelY = (maxY - minY) / mapRes;
+    auto snap = [](float v, float s) { 
+        return std::floor(v / s) * s; 
+    };
+    minX = snap(minX, worldUnitsPerTexelX); 
+    maxX = snap(maxX, worldUnitsPerTexelX);
+    minY = snap(minY, worldUnitsPerTexelY); 
+    maxY = snap(maxY, worldUnitsPerTexelY);
 
-    glm::mat4 lightProjection = glm::ortho(minX, maxX, minY, maxY, minZ, maxZ);
-    lightProjection[1][1] *= -1.f;
+    // pad so shadows don't disappear due to objects falling outside ortho bounds
+    const float zPad = 25.0f; // tunable
+    minZ -= zPad;
+    maxZ += zPad;
 
-    glm::mat4 lightSpaceMatrix = lightProjection * lightView;
-
-    return lightSpaceMatrix;
+    // Vulkan ortho
+    glm::mat4 lightProj = glm::orthoRH_ZO(minX, maxX, minY, maxY, -maxZ, -minZ);
+    return lightProj * lightView;
 }
 
 std::vector<glm::mat4> VulkanEngine::getLightSpaceMatrices(uint32_t num_cascades, const std::vector<float>& cascade_planes, float near_plane, float far_plane, const glm::mat4& view, const glm::vec4& lightDir) {

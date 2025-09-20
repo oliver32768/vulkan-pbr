@@ -67,16 +67,6 @@ float GetShadowBias(vec3 N, vec3 L, float texelWidth) {
   return quantize + b * length(cross(N, L)) / NoL;
 }
 
-vec3 ACESFilm(vec3 x) {
-    // Narkowicz 2015 approximation
-    const float a = 2.51;
-    const float b = 0.03;
-    const float c = 2.43;
-    const float d = 0.59;
-    const float e = 0.14;
-    return clamp((x*(a*x + b)) / (x*(c*x + d) + e), 0.0, 1.0);
-}
-
 int selectCascade(float z) {
     // csm.splitDepths = [znear, s1, ..., zfar] in the SAME space as vViewDepth
     for (int i = 0; i < NUM_CASCADES; ++i) {
@@ -114,6 +104,11 @@ float ShadowCalculation(vec3 fragPosWorldSpace, vec3 normal, vec3 lightDir) {
     }
 
     return shadow;
+}
+
+vec3 hsv2rgb(vec3 c) {
+    vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0);
+    return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
 }
 
 void main() {
@@ -195,24 +190,34 @@ void main() {
     // --- Shadow Mapping ---
     float shadow = ShadowCalculation(vWorldPos, normalize(vWorldNormal), L); // use geometric normal?
     vec3 color = emissive + ambient + ((1.0 - shadow) * direct);
-    //vec3 color = emissive + ambient + direct;
 
-    //vec4 fragPosViewSpace = sceneData.view * vec4(vWorldPos, 1.0);
+    // Debug: show cascade
+    /*
+    vec4 fragPosViewSpace = sceneData.view * vec4(vWorldPos, 1.0);
+    float depthValue = -fragPosViewSpace.z;
+    int layer = selectCascade(depthValue);
+    vec3 layerColor = 0.1 * hsv2rgb(vec3(float(layer) / float(NUM_CASCADES), 1.0, 1.0));
+    */
 
-    outFragColor = vec4(color, alphaOut);
-
+    // Debug: show roughness
     //outFragColor = vec4(vec3(roughness), alphaOut);
 
     // Debug: show shadows only
     //outFragColor = vec4(vec3(shadow), 1.0);
 
     // Debug: show light space or shadow map depth
-    //vec3 projCoords = vFragPosLightSpace.xyz / vFragPosLightSpace.w;
-    //vec2 uv = projCoords.xy * 0.5 + 0.5; // map from [-1,1] to [0,1]
-    //float receiverDepth = projCoords.z; // Vulkan NDC z is already [0,1]; don't remap
-    //float closestDepth = texture(uShadowMap, uv).r;
-    // Debug 1: receiver depth (what this fragment's depth would write)
-    //outFragColor = vec4(receiverDepth);
-    // Debug 2: depth stored in the shadow map at same UV
-    //outFragColor = vec4(closestDepth);
+    /*
+    vec3 projCoords = vFragPosLightSpace.xyz / vFragPosLightSpace.w;
+    vec2 uv = projCoords.xy * 0.5 + 0.5; // map from [-1,1] to [0,1]
+    float receiverDepth = projCoords.z; // Vulkan NDC z is already [0,1]; don't remap
+    float closestDepth = texture(uShadowMap, uv).r;
+
+    //Debug 1: receiver depth (what this fragment's depth would write)
+    outFragColor = vec4(receiverDepth);
+
+    //Debug 2: depth stored in the shadow map at same UV
+    outFragColor = vec4(closestDepth);
+    */
+
+    outFragColor = vec4(color, alphaOut);
 }

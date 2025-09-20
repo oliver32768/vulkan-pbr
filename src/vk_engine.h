@@ -246,8 +246,8 @@ public:
 	EngineStats stats;
 	std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
 
-	float mAzimuth = glm::radians(60.0f);
-	float mZenith = glm::radians(30.0f);
+	float mAzimuth = glm::radians(-155.0f);
+	float mZenith = glm::radians(20.0f);
 	float lightDist = 90.0f;
 	float lightIntensity = 12.5f;
 	glm::vec3 lightColor = glm::vec3(1.0f, 0.8f, 0.8f);
@@ -345,7 +345,7 @@ public:
 
 	void init_shadow_mapping_descriptor_set();
 
-	glm::mat4 compute_light_space_matrix(float, float, const glm::mat4& view, const glm::vec4& lightDir);
+	glm::mat4 compute_light_space_matrix(float, float, const glm::mat4& view, const glm::vec4& lightDir4);
 
 	std::vector<glm::mat4> getLightSpaceMatrices(uint32_t num_cascades, const std::vector<float>& cascade_planes, float near_plane, float far_plane, const glm::mat4& view, const glm::vec4& lightDir);
 
