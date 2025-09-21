@@ -1050,6 +1050,8 @@ void VulkanEngine::init() {
     init_shadow_mapping_pipeline();
     init_shadow_mapping_descriptor_set();
 
+    init_point_light_descriptor_set();
+
     init_pipelines();
 
     init_imgui();
@@ -1059,6 +1061,11 @@ void VulkanEngine::init() {
     mainCamera.position = glm::vec3(-16.15f, 6.09f, -4.58f);
     mainCamera.pitch = -0.26;
     mainCamera.yaw = 1.73;
+
+    PointLight pointLight{};
+    pointLight.pos_radius = glm::vec4(-5.0f, 2.0f, -5.0f, 1.0f);
+    pointLight.color_intensity = glm::vec4(1.0f, 0.0f, 0.0f, 10.0f);
+    _lightRes.lights.push_back(pointLight);
 
     std::string helmetPath = { "..\\..\\assets\\DamagedHelmet.glb" };
     auto helmetFile = loadGltf(this, helmetPath);
@@ -1119,7 +1126,7 @@ void VulkanEngine::cleanup() {
 void VulkanEngine::update_scene() {
     auto start = std::chrono::system_clock::now();
 
-    loadedScenes["DamagedHelmet"]->Draw(glm::mat4{ 1.f }, mainDrawContext);
+    //loadedScenes["DamagedHelmet"]->Draw(glm::mat4{ 1.f }, mainDrawContext);
     loadedScenes["Bistro"]->Draw(glm::mat4{ 1.f }, mainDrawContext);
 
     mainCamera.update(deltaTime);
@@ -1142,17 +1149,21 @@ void VulkanEngine::update_scene() {
 
     float lambda = 0.7f;
     _shadowRes.cascadePlanes = buildCascadePlanes(_shadowRes.numCascades, near, far, lambda);
-
-    std::vector<glm::mat4> cascades = getLightSpaceMatrices(_shadowRes.numCascades, _shadowRes.cascadePlanes, near, far, sceneData.view, sceneData.sunlightDirection);
-
+    std::vector<LightInfo> cascades = getLightSpaceMatrices(_shadowRes.numCascades, _shadowRes.cascadePlanes, near, far, sceneData.view, sceneData.sunlightDirection);
     std::vector<GPUShadowMapData> cascadeData{};
+    std::vector<glm::vec2> orthoDims{};
     for (int i = 0; i < cascades.size(); ++i) {
-        glm::mat4 m = cascades[i];
-        GPUShadowMapData data{ .lightSpaceMatrix = m };
-        cascadeData.push_back(data);
+        GPUShadowMapData m{ 
+            .lightSpaceMatrix = cascades[i].lightViewProj 
+        };
+        cascadeData.push_back(m);
+
+        orthoDims.push_back(cascades[i].orthoDims);
     }
-    
-    _shadowRes.dataPerCascade = cascadeData;
+    _shadowRes.dataPerCascade = cascadeData;    
+    _shadowRes.orthoDims = orthoDims;
+
+    _lightRes.lightParams.lightCount = _lightRes.lights.size();
 
     auto end = std::chrono::system_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -1301,13 +1312,11 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     GPUSceneData* sceneUniformData = (GPUSceneData*)gpuSceneDataBuffer.allocation->GetMappedData();
     *sceneUniformData = sceneData;
     VkDescriptorSet globalDescriptor = get_current_frame()._frameDescriptors.allocate(_device, _gpuSceneDataDescriptorLayout);
-
     {
         DescriptorWriter writer;
         writer.write_buffer(0, gpuSceneDataBuffer.buffer, sizeof(GPUSceneData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         writer.update_set(_device, globalDescriptor);
     }
-
     get_current_frame()._deletionQueue.push_function([=, this]() {
         destroy_buffer(gpuSceneDataBuffer);
     });
@@ -1324,7 +1333,6 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 
     // Cascades data
     AllocatedBuffer gpuCascadesBuffer = create_buffer(sizeof(GPUShadowCascades), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-
     auto* csmUBO = reinterpret_cast<GPUShadowCascades*>(gpuCascadesBuffer.allocation->GetMappedData());
     for (uint32_t i = 0; i < NUM_CASCADES; ++i) {
         csmUBO->lightViewProj[i] = _shadowRes.dataPerCascade[i].lightSpaceMatrix;
@@ -1332,18 +1340,39 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     for (uint32_t i = 0; i <= NUM_CASCADES; ++i) {
         csmUBO->splitDepths[i].v = _shadowRes.cascadePlanes[i]; // view-space distances
     }
-
+    for (uint32_t i = 0; i < NUM_CASCADES; ++i) {
+        csmUBO->orthoDims[i].v = _shadowRes.orthoDims[i];
+    }
     _shadowRes.shadowUboSet = _shadowRes.descriptorAllocator.allocate(_device, _shadowRes.shadowUboSetLayout);
-
     {
         DescriptorWriter writer;
         writer.write_buffer(0, gpuCascadesBuffer.buffer, sizeof(GPUShadowCascades), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         writer.update_set(_device, _shadowRes.shadowUboSet);
     }
-
-    // cleanup later this frame
     get_current_frame()._deletionQueue.push_function([=, this] {
         destroy_buffer(gpuCascadesBuffer);
+    });
+
+    // Point light data
+    size_t pointLightsSize = _lightRes.lights.size() * sizeof(PointLight);
+    AllocatedBuffer pointLightBuffer = create_buffer(pointLightsSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    // TODO: Unsure if below will work, different from before
+    void* pointLightsPtr = pointLightBuffer.info.pMappedData; 
+    std::memcpy(pointLightsPtr, _lightRes.lights.data(), pointLightsSize);
+    AllocatedBuffer lightParamBuffer = create_buffer(sizeof(LightParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto* lightParamPtr = reinterpret_cast<LightParams*>(lightParamBuffer.allocation->GetMappedData());
+    *lightParamPtr = _lightRes.lightParams;
+    // TODO: Alloc descriptor set on the fly here? It's what I did before
+    _lightRes.set = _lightRes.descriptorAllocator.allocate(_device, _lightRes.setLayout);
+    {
+        DescriptorWriter writer;
+        writer.write_buffer(0, pointLightBuffer.buffer, pointLightsSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(3, lightParamBuffer.buffer, sizeof(LightParams), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        writer.update_set(_device, _lightRes.set);
+    }
+    get_current_frame()._deletionQueue.push_function([=, this] {
+        destroy_buffer(pointLightBuffer);
+        destroy_buffer(lightParamBuffer);
     });
 
     // state tracking, used to avoid redundant re-bindings in consecutive calls to `draw` lambda
@@ -1361,6 +1390,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.material->pipeline->layout, 2, 1, &_ibl.iblSet, 0, nullptr);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.material->pipeline->layout, 3, 1, &_shadowRes.shadowSet, 0, nullptr);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.material->pipeline->layout, 4, 1, &_shadowRes.shadowUboSet, 0, nullptr);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.material->pipeline->layout, 5, 1, &_lightRes.set, 0, nullptr);
 
                 VkViewport viewport = {};
                 viewport.x = 0;
@@ -1551,7 +1581,7 @@ void VulkanEngine::run() {
         ImGui::End();
 
         // Lighting controls
-        ImGui::Begin("Lighting");
+        ImGui::Begin("Directional Light");
 
         // Sliders shown in degrees, values kept in radians
         ImGui::SliderAngle("Azimuth", &mAzimuth, -180.0f, 180.0f);
@@ -1580,6 +1610,59 @@ void VulkanEngine::run() {
             mainCamera.position.z);
         ImGui::Text("Pitch: %.2f", mainCamera.pitch);
         ImGui::Text("Yaw:   %.2f", mainCamera.yaw);
+        ImGui::End();
+
+        ImGui::Begin("Point Lights");
+
+        // Add button — pushes a default light
+        if (ImGui::Button("Add point light")) {
+            PointLight pl{};
+            pl.color_intensity = glm::vec4(1.f, 1.f, 1.f, 1.f); // color (rgb) + intensity
+            pl.pos_radius = glm::vec4(0.f, 0.f, 0.f, 1.f); // position (xyz) + radius
+            _lightRes.lights.push_back(pl);
+        }
+
+        // Small status line
+        ImGui::SameLine();
+        ImGui::Text("Count: %zu", _lightRes.lights.size());
+
+        ImGui::Separator();
+
+        // Collapsible sections for existing lights (with per-light remove)
+        for (size_t i = 0; i < _lightRes.lights.size(); /* incremented manually */) {
+            ImGui::PushID(static_cast<int>(i));
+            auto& pl = _lightRes.lights[i];
+
+            // Each light gets its own collapsible header
+            const std::string label = "Light " + std::to_string(i);
+            if (ImGui::CollapsingHeader(label.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+
+                // Position (xyz) + Radius (w)
+                ImGui::DragFloat3("Position", &pl.pos_radius.x, 0.1f);
+                ImGui::DragFloat("Radius", &pl.pos_radius.w, 0.05f, 0.0f, 1e6f);
+                if (pl.pos_radius.w < 0.0f) pl.pos_radius.w = 0.0f;
+
+                // Color (rgb) + Intensity (w)
+                ImGui::ColorEdit3("Color", &pl.color_intensity.x);
+                ImGui::DragFloat("Intensity", &pl.color_intensity.w, 0.05f, 0.0f, 1e6f);
+                if (pl.color_intensity.w < 0.0f) pl.color_intensity.w = 0.0f;
+
+                // Remove button for this light
+                if (ImGui::Button("Remove")) {
+                    _lightRes.lights.erase(_lightRes.lights.begin() + static_cast<long>(i));
+                    ImGui::PopID();
+                    // do not increment i; the next element shifts into index i
+                    continue;
+                }
+            }
+
+            ImGui::PopID();
+            ++i;
+        }
+
+        // Keep the GPU-facing count in sync
+        _lightRes.lightParams.lightCount = static_cast<uint32_t>(_lightRes.lights.size());
+
         ImGui::End();
 
         ImGui::Render();
@@ -1625,10 +1708,11 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine) {
         materialLayout,
         engine->_ibl.iblSetLayout, 
         engine->_shadowRes.shadowSetLayout, 
-        engine->_shadowRes.shadowUboSetLayout  
+        engine->_shadowRes.shadowUboSetLayout,
+        engine->_lightRes.setLayout
     };
     VkPipelineLayoutCreateInfo mesh_layout_info = vkinit::pipeline_layout_create_info();
-    mesh_layout_info.setLayoutCount = 5;
+    mesh_layout_info.setLayoutCount = 6;
     mesh_layout_info.pSetLayouts = layouts;
     mesh_layout_info.pPushConstantRanges = &matrixRange;
     mesh_layout_info.pushConstantRangeCount = 1;
@@ -1745,6 +1829,25 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx) {
     Node::Draw(topMatrix, ctx);
 }
 
+// Point lights
+
+void VulkanEngine::init_point_light_descriptor_set() {
+    DescriptorLayoutBuilder b;
+    b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // lights
+    b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // offsets
+    b.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // indices
+    b.add_binding(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER); // params
+    _lightRes.setLayout = b.build(_device, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT);
+
+    DescriptorAllocatorGrowable::PoolSizeRatio sizes[] = {
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8.0f },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8.0f }
+    };
+    _lightRes.descriptorAllocator = DescriptorAllocatorGrowable{};
+    _lightRes.descriptorAllocator.init(_device, 64, std::span(sizes));
+    _lightRes.set = _lightRes.descriptorAllocator.allocate(_device, _lightRes.setLayout);
+}
+
 // Shadow mapping
 
 void VulkanEngine::init_shadow_mapping_pipeline() {
@@ -1859,12 +1962,12 @@ void VulkanEngine::init_shadow_mapping_descriptor_set() {
 
     {
         DescriptorLayoutBuilder b;
-        b.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER); // shadow map
+        b.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER); 
         _shadowRes.shadowUboSetLayout = b.build(_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
     }
 }
 
-glm::mat4 VulkanEngine::compute_light_space_matrix(float near, float far, const glm::mat4& view, const glm::vec4& lightDir4) {
+LightInfo VulkanEngine::compute_light_space_matrix(float near, float far, const glm::mat4& view, const glm::vec4& lightDir4) {
     constexpr float fovY = glm::radians(70.f);
     const float aspect = (float)_windowExtent.width / (float)_windowExtent.height;
 
@@ -1916,18 +2019,27 @@ glm::mat4 VulkanEngine::compute_light_space_matrix(float near, float far, const 
 
     // Vulkan ortho
     glm::mat4 lightProj = glm::orthoRH_ZO(minX, maxX, minY, maxY, -maxZ, -minZ);
-    return lightProj * lightView;
+    float orthoWidth = maxX - minX;
+    float orthoHeight = maxY - minY;
+
+    LightInfo ret = {
+        .lightViewProj = lightProj * lightView,
+        .orthoDims = glm::vec2(orthoWidth, orthoHeight)
+    };
+
+    return ret;
 }
 
-std::vector<glm::mat4> VulkanEngine::getLightSpaceMatrices(uint32_t num_cascades, const std::vector<float>& cascade_planes, float near_plane, float far_plane, const glm::mat4& view, const glm::vec4& lightDir) {
+std::vector<LightInfo> VulkanEngine::getLightSpaceMatrices(uint32_t num_cascades, const std::vector<float>& cascade_planes, float near_plane, float far_plane, const glm::mat4& view, const glm::vec4& lightDir) {
     assert(cascade_planes.size() == num_cascades + 1);
-    std::vector<glm::mat4> ret;
+    std::vector<LightInfo> ret;
     ret.reserve(num_cascades);
 
     for (uint32_t i = 0; i < num_cascades; ++i) {
         float n = cascade_planes[i];
         float f = cascade_planes[i + 1];
-        ret.emplace_back(compute_light_space_matrix(n, f, view, lightDir));
+        LightInfo temp = compute_light_space_matrix(n, f, view, lightDir);
+        ret.emplace_back(temp);
     }
     return ret;
 }

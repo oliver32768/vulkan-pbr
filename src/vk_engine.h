@@ -92,6 +92,11 @@ struct ComputePushConstants {
 	glm::vec4 data4;
 };
 
+struct LightInfo {
+	glm::mat4 lightViewProj;
+	glm::vec2 orthoDims;
+};
+
 struct GPUSceneData {
 	glm::mat4 view;
 	glm::mat4 proj;
@@ -103,18 +108,26 @@ struct GPUSceneData {
 
 constexpr uint32_t NUM_CASCADES = 5;
 
-struct Std140Float {
-	float v;       // value
-	float _pad[3]; // pad to 16B
+struct alignas(16) Std140Float {
+	float v;
+	float _pad[3]; // 16-byte stride
 };
 static_assert(sizeof(Std140Float) == 16);
 
-struct GPUShadowCascades {
-	glm::mat4 lightViewProj[NUM_CASCADES];
-	Std140Float splitDepths[NUM_CASCADES + 1]; // std140 stride 16
+struct alignas(16) Std140Vec2 {
+	glm::vec2 v;
+	float _pad[2]; // 16-byte stride
 };
+static_assert(sizeof(Std140Vec2) == 16);
+
+struct alignas(16) GPUShadowCascades {
+	glm::mat4 lightViewProj[NUM_CASCADES]; // 64 each
+	Std140Float splitDepths[NUM_CASCADES + 1]; // 16 stride
+	Std140Vec2 orthoDims[NUM_CASCADES]; // 16 stride
+};
+
 static_assert(sizeof(glm::mat4) == 64);
-static_assert(sizeof(GPUShadowCascades) == 320 + (NUM_CASCADES + 1) * 16);
+static_assert(sizeof(GPUShadowCascades) == 64 * NUM_CASCADES + 16 * (NUM_CASCADES + 1) + 16 * NUM_CASCADES); // 496 when N=5
 
 struct ComputeEffect {
 	const char* name;
@@ -237,6 +250,30 @@ struct ShadowMappingResources {
 
 	uint32_t numCascades;
 	std::vector<float> cascadePlanes;
+
+	std::vector<glm::vec2> orthoDims;
+};
+
+struct PointLight {
+	glm::vec4 pos_radius;
+	glm::vec4 color_intensity;
+};
+
+struct LightParams {
+	uint32_t lightCount;
+	glm::uvec3 gridDim;
+	uint32_t useClusters;
+};
+
+struct ClusteredLightResources {
+	DescriptorAllocatorGrowable descriptorAllocator;
+	VkDescriptorSetLayout setLayout{};
+	VkDescriptorSet set{};
+
+	std::vector<PointLight> lights;
+	std::vector<uint32_t> offsets;
+	std::vector<uint32_t> indices;
+	LightParams lightParams{};
 };
 
 class VulkanEngine {
@@ -246,11 +283,13 @@ public:
 	EngineStats stats;
 	std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
 
-	float mAzimuth = glm::radians(-155.0f);
+	float mAzimuth = glm::radians(180.0f);
 	float mZenith = glm::radians(20.0f);
 	float lightDist = 90.0f;
 	float lightIntensity = 12.5f;
 	glm::vec3 lightColor = glm::vec3(1.0f, 0.8f, 0.8f);
+
+	ClusteredLightResources _lightRes;
 
 	ShadowMappingResources _shadowRes;
 
@@ -341,13 +380,15 @@ public:
 	void draw();
 	void run();
 
+	void init_point_light_descriptor_set();
+
 	void init_shadow_mapping_pipeline();
 
 	void init_shadow_mapping_descriptor_set();
 
-	glm::mat4 compute_light_space_matrix(float, float, const glm::mat4& view, const glm::vec4& lightDir4);
+	LightInfo compute_light_space_matrix(float, float, const glm::mat4& view, const glm::vec4& lightDir4);
 
-	std::vector<glm::mat4> getLightSpaceMatrices(uint32_t num_cascades, const std::vector<float>& cascade_planes, float near_plane, float far_plane, const glm::mat4& view, const glm::vec4& lightDir);
+	std::vector<LightInfo> getLightSpaceMatrices(uint32_t num_cascades, const std::vector<float>& cascade_planes, float near_plane, float far_plane, const glm::mat4& view, const glm::vec4& lightDir);
 
 	void init_brdf_integration_pipeline();
 

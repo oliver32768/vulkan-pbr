@@ -53,10 +53,6 @@ float V_SmithGGXCorrelated(float NoV, float NoL, float a) {
     return 0.5 / (GGXV + GGXL);
 }
 
-vec3 reinhardTonemap(vec3 color) {
-    return color / (color + vec3(1.0));
-}
-
 // Returns an exact shadow bias in the space of whatever texelWidth is in.
 // N and L are expected to be normalized
 float GetShadowBias(vec3 N, vec3 L, float texelWidth) {
@@ -113,10 +109,17 @@ float ShadowCalculation(vec3 fragPosWorldSpace, vec3 normal, vec3 lightDir) {
 
     if (currentDepth > 1.0) return 0.0;
 
-    vec2 texelSize = 1.0 / vec2(textureSize(uShadowMap, 0));
-    float bias = GetShadowBias(normalize(normal), normalize(lightDir), texelSize.x);
-
     const float pcfRadiusTexels = 2.5;
+    vec2 shadowRes = vec2(textureSize(uShadowMap, 0).xy);
+    vec2 worldPerTex = csm.orthoXY[layer] / shadowRes;
+    float texelWidthWorld = worldPerTex.x;
+    float texelWidthForBias = texelWidthWorld * pcfRadiusTexels;
+
+    vec2 texelSize = 1.0 / vec2(textureSize(uShadowMap, 0));
+    float texelWidth = texelSize.x;
+
+    float bias = GetShadowBias(normalize(normal), normalize(lightDir), texelWidth);
+
     float angle = 6.2831853 * hash12(gl_FragCoord.xy);
     mat2 R = rot2(angle);
     float jitter = mix(0.9, 1.1, hash12(gl_FragCoord.yx * 1.37));
@@ -145,6 +148,46 @@ float ShadowCalculation(vec3 fragPosWorldSpace, vec3 normal, vec3 lightDir) {
 vec3 hsv2rgb(vec3 c) {
     vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0);
     return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
+}
+
+// Point light shaded with the same GGX/Smith BRDF used for the sun
+vec3 shadePointLight(Light light, vec3 P, vec3 N, vec3 V, float NoV, vec3 baseColor, vec3 F0, float alpha, float metallic){
+    // Vector from fragment to light
+    vec3 L = light.pos_radius.xyz - P;
+    float d2 = max(dot(L, L), 1e-8);
+    float d  = sqrt(d2);
+    L /= d;
+
+    float NoL = clamp(dot(N, L), 0.0, 1.0);
+    if (NoL <= 0.0) return vec3(0.0);
+
+    vec3 H = normalize(V + L);
+    float NoH = clamp(dot(N, H), 0.0, 1.0);
+    float VoH = clamp(dot(V, H), 0.0, 1.0);
+
+    // Microfacet terms
+    float D = D_GGX(NoH, alpha);
+    float G = V_SmithGGXCorrelated(NoV, NoL, alpha);
+    vec3  F = F_Schlick(VoH, F0);
+
+    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+    vec3 Fr = D * G * F;
+    vec3 Fd = kD * (baseColor / PI);
+
+    vec3 Li = light.color_intensity.rgb * light.color_intensity.a;
+
+    float attenuation = 1.0 / d2;
+
+    // smooth range falloff using pos_radius.w as range
+    float range = light.pos_radius.w;
+    if (range > 0.0) {
+        // Smoothly fade to zero near the edge; keeps inverse-square behavior at the core.
+        float x = clamp(d / range, 0.0, 1.0);
+        float s = (1.0 - x*x*x*x); // (1 - (d/R)^4)
+        attenuation *= s * s; // square for a softer knee
+    }
+
+    return (Fd + Fr) * Li * NoL * attenuation;
 }
 
 void main() {
@@ -184,7 +227,7 @@ void main() {
     float LoH = clamp(dot(L, H), 0.0, 1.0);
     float VoH = clamp(dot(V, H), 0.0, 1.0);
 
-    // perceptually linear roughness to roughness (see parameterization)
+    // perceptually linear roughness to roughness
     float alpha = roughness * roughness;
 
     vec3 F0 = mix(vec3(0.04), baseColor, metallic);
@@ -199,14 +242,13 @@ void main() {
     vec3 Fr = (D * G * F); // 1.0 / max(4.0 * NoV * NoL, 1e-4) is already part of the G we calculate
     vec3 Fd = kD * (baseColor / PI);
 
-    // directional light
+    // --- Directional light ---
     vec3 L_i = sceneData.sunlightColor.rgb * sceneData.sunlightColor.w;
     float cos_i = NoL;
 
     vec3 direct = (Fd + Fr) * L_i * cos_i;
 
     // --- IBL ---
-
     const float MAX_REFLECTION_LOD = floor(log2(1024)) + 1; // use `textureQueryLevels`?
     vec3 F_NV = fresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
 
@@ -227,33 +269,11 @@ void main() {
     float shadow = ShadowCalculation(vWorldPos, normalize(vWorldNormal), L); // use geometric normal?
     vec3 color = emissive + ambient + ((1.0 - shadow) * direct);
 
-    // Debug: show cascade
-    /*
-    vec4 fragPosViewSpace = sceneData.view * vec4(vWorldPos, 1.0);
-    float depthValue = -fragPosViewSpace.z;
-    int layer = selectCascade(depthValue);
-    vec3 layerColor = 0.1 * hsv2rgb(vec3(float(layer) / float(NUM_CASCADES), 1.0, 1.0));
-    */
-
-    // Debug: show roughness
-    //outFragColor = vec4(vec3(roughness), alphaOut);
-
-    // Debug: show shadows only
-    //outFragColor = vec4(vec3(shadow), 1.0);
-
-    // Debug: show light space or shadow map depth
-    /*
-    vec3 projCoords = vFragPosLightSpace.xyz / vFragPosLightSpace.w;
-    vec2 uv = projCoords.xy * 0.5 + 0.5; // map from [-1,1] to [0,1]
-    float receiverDepth = projCoords.z; // Vulkan NDC z is already [0,1]; don't remap
-    float closestDepth = texture(uShadowMap, uv).r;
-
-    //Debug 1: receiver depth (what this fragment's depth would write)
-    outFragColor = vec4(receiverDepth);
-
-    //Debug 2: depth stored in the shadow map at same UV
-    outFragColor = vec4(closestDepth);
-    */
+    // --- Point lights ---
+    for (uint li = 0u; li < u.lightCount; ++li) {
+        Light Lgt = lights[li];
+        color += shadePointLight(Lgt, vWorldPos, N, V, NoV, baseColor, F0, alpha, metallic);
+    }
 
     outFragColor = vec4(color, alphaOut);
 }

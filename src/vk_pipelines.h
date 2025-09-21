@@ -33,6 +33,7 @@ public:
     void set_depth_format(VkFormat format);
     void disable_blending();
     void set_multisampling_none();
+    void enable_multisampling();
     void set_cull_mode(VkCullModeFlags cullMode, VkFrontFace frontFace);
     void set_polygon_mode(VkPolygonMode mode);
     void set_input_topology(VkPrimitiveTopology topology);

@@ -301,6 +301,30 @@ VkImageCreateInfo vkinit::image_create_info(VkFormat format, VkImageUsageFlags u
     return info;
 }
 
+VkImageCreateInfo vkinit::image_create_info(VkFormat format, VkImageUsageFlags usageFlags, VkExtent3D extent, VkSampleCountFlagBits samples)
+{
+    VkImageCreateInfo info = {};
+    info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    info.pNext = nullptr;
+
+    info.imageType = VK_IMAGE_TYPE_2D;
+
+    info.format = format;
+    info.extent = extent;
+
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+
+    //for MSAA. we will not be using it by default, so default it to 1 sample per pixel.
+    info.samples = samples;
+
+    //optimal tiling, which means the image is stored on the best gpu format
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = usageFlags;
+
+    return info;
+}
+
 VkImageViewCreateInfo vkinit::imageview_create_info(VkFormat format, VkImage image, VkImageAspectFlags aspectFlags)
 {
     // build a image-view for the depth image to use for rendering
