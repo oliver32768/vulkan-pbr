@@ -22,6 +22,7 @@
 
 #include <chrono>
 #include <thread>
+#include <random>
 
 #ifdef _DEBUG
 constexpr bool bUseValidationLayers = true;
@@ -32,6 +33,49 @@ constexpr bool bUseValidationLayers = false;
 uint32_t MAX_MIPS = 15;
 
 VulkanEngine* loadedEngine = nullptr;
+
+void VulkanEngine::addRandomPointLightsInRect(int N, glm::vec2 corner1, glm::vec2 corner2) {
+    // corner components are (x,z)
+    const float minX = std::min(corner1.x, corner2.x);
+    const float maxX = std::max(corner1.x, corner2.x);
+    const float minZ = std::min(corner1.y, corner2.y);
+    const float maxZ = std::max(corner1.y, corner2.y);
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+
+    std::uniform_real_distribution<float> distX(minX, maxX);
+    std::uniform_real_distribution<float> distZ(minZ, maxZ);
+    std::uniform_real_distribution<float> distY(0.2f, 0.8f);
+    std::uniform_real_distribution<float> distRadius(0.5f, 10.0f);
+    std::uniform_real_distribution<float> distIntensity(5.0f, 10.0f);
+    std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
+
+    _lightRes.lights.reserve(_lightRes.lights.size() + static_cast<size_t>(N));
+
+    for (int i = 0; i < N; ++i) {
+        // Random unit RGB (normalize random vector from [0,1]^3)
+        glm::vec3 rgb(dist01(gen), dist01(gen), dist01(gen));
+        float m = glm::length(rgb);
+        if ((m * m) < 1e-10f) rgb = glm::vec3(1, 0, 0);
+        rgb = glm::normalize(rgb);
+
+        PointLight l{};
+        l.pos_radius = glm::vec4(
+            distX(gen), // x (independent)
+            distY(gen), // y in [0.2, 0.8]
+            distZ(gen), // z (independent)
+            distRadius(gen) // radius in [0.5, 10]
+        );
+
+        l.color_intensity = glm::vec4(
+            rgb, // random unit color
+            distIntensity(gen) // intensity in [5, 10]
+        );
+
+        _lightRes.lights.push_back(l);
+    }
+}
 
 // lambda = 0 => uniform, lambda = 1 => logarithmic. Typically 0.6-0.9
 static std::vector<float> buildCascadePlanes(int numCascades, float nearPlane, float farPlane, float lambda) {
@@ -1034,7 +1078,8 @@ void VulkanEngine::init() {
     // snow
     // metro
     // winter_evening_4k
-    _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\kloofendal_48d_partly_cloudy_puresky_4k.hdr", 1024, true); 
+    // hansaplatz_4k
+    _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\moonlit_golf_4k.hdr", 1024, true); 
 
     init_irradiance_cubemap_pipeline();
     _ibl.irradiancemap = generate_irradiance_map_from_cubemap(1024, true);
@@ -1058,14 +1103,11 @@ void VulkanEngine::init() {
     init_default_data();
 
     mainCamera.velocity = glm::vec3(0.f);
-    mainCamera.position = glm::vec3(-16.15f, 6.09f, -4.58f);
-    mainCamera.pitch = -0.26;
-    mainCamera.yaw = 1.73;
+    mainCamera.position = glm::vec3(-14.5, 2.5, -0.5);
+    mainCamera.pitch = 0.0;
+    mainCamera.yaw = 1.5;
 
-    PointLight pointLight{};
-    pointLight.pos_radius = glm::vec4(-5.0f, 2.0f, -5.0f, 1.0f);
-    pointLight.color_intensity = glm::vec4(1.0f, 0.0f, 0.0f, 10.0f);
-    _lightRes.lights.push_back(pointLight);
+    addRandomPointLightsInRect(64, glm::vec2(-20.0f, -20.0f), glm::vec2(20.0f, 20.0f));
 
     std::string helmetPath = { "..\\..\\assets\\DamagedHelmet.glb" };
     auto helmetFile = loadGltf(this, helmetPath);

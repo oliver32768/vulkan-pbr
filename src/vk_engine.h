@@ -286,7 +286,7 @@ public:
 	float mAzimuth = glm::radians(180.0f);
 	float mZenith = glm::radians(20.0f);
 	float lightDist = 90.0f;
-	float lightIntensity = 12.5f;
+	float lightIntensity = 4.0f;
 	glm::vec3 lightColor = glm::vec3(1.0f, 0.8f, 0.8f);
 
 	ClusteredLightResources _lightRes;
@@ -424,6 +424,7 @@ public:
 
 	AllocatedImage create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
 	AllocatedImage create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
+	void addRandomPointLightsInRect(int N, glm::vec2 corner1, glm::vec2 corner2);
 	VkImageView create_view(VkImage image, VkFormat format, VkImageAspectFlags aspect, VkImageViewType type, uint32_t baseMip, uint32_t mipCount, uint32_t baseLayer, uint32_t layerCount);
 	AllocatedImage create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped, uint32_t arrayLayers, VkImageViewType viewType, VkImageCreateFlags flags = 0, VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
 	void destroy_image(const AllocatedImage& img);
