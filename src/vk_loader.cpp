@@ -398,6 +398,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
         // write descriptors
         newMat->data = engine->metalRoughMaterial.write_material(engine->_device, passType, materialResources, file.descriptorPool);
+        newMat->zPrepassData = engine->metalRoughMaterial.write_z_prepass_material(engine->_device, passType, materialResources, file.descriptorPool);
 
         mat_idx++;
     }

@@ -785,6 +785,7 @@ void VulkanEngine::init_pipelines() {
     init_background_pipelines();
     init_mesh_pipeline();
     metalRoughMaterial.build_pipelines(this);
+    metalRoughMaterial.build_z_prepass_pipeline(this);
     init_skybox_pipeline();
 }
 
@@ -1250,8 +1251,6 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     // and then our opaque_draws would be something like 20 bits draw index, and 44 bits for sort key/hash.
     // That way would be faster than this as it can be sorted through faster methods"
 
-    VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
-
     VkViewport shadowViewport = {};
     shadowViewport.x = 0;
     shadowViewport.y = 0;
@@ -1280,6 +1279,21 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     scissor.extent.width = _drawExtent.width;
     scissor.extent.height = _drawExtent.height;
 
+    // Global scene data
+
+    AllocatedBuffer gpuSceneDataBuffer = create_buffer(sizeof(GPUSceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    GPUSceneData* sceneUniformData = (GPUSceneData*)gpuSceneDataBuffer.allocation->GetMappedData();
+    *sceneUniformData = sceneData;
+    VkDescriptorSet globalDescriptor = get_current_frame()._frameDescriptors.allocate(_device, _gpuSceneDataDescriptorLayout);
+    {
+        DescriptorWriter writer;
+        writer.write_buffer(0, gpuSceneDataBuffer.buffer, sizeof(GPUSceneData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        writer.update_set(_device, globalDescriptor);
+    }
+    get_current_frame()._deletionQueue.push_function([=, this]() {
+        destroy_buffer(gpuSceneDataBuffer);
+    });
+
     // --- Cluster Building Compute Pipeline ---
 
     // 1. Build cluster grid
@@ -1287,6 +1301,59 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     AllocatedBuffer froxelAABBs = build_cluster_grid();
 
     // 2. Z pre-pass
+
+    MaterialPipeline* lastPipeline = nullptr;
+    MaterialInstance* lastMaterial = nullptr;
+    VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
+    auto preDepth = vkinit::depth_attachment_info(
+        _depthImage.imageView,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        0.0f, 0
+    );
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, metalRoughMaterial.zPrepassPipeline.pipeline);
+
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    auto zPrepass = [&](const RenderObject& r) {
+        if (r.zPrepassMaterial != lastMaterial) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, metalRoughMaterial.zPrepassPipeline.layout, 0, 1, &globalDescriptor, 0, nullptr);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, metalRoughMaterial.zPrepassPipeline.layout, 1, 1, &r.zPrepassMaterial->materialSet, 0, nullptr);
+
+            lastMaterial = r.zPrepassMaterial;
+            lastPipeline = r.zPrepassMaterial->pipeline;
+        }
+
+        // rebind index buffer if needed. != operator here is just comparing handles
+        if (r.indexBuffer != lastIndexBuffer) {
+            lastIndexBuffer = r.indexBuffer;
+            vkCmdBindIndexBuffer(cmd, r.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        }
+
+        // calculate final mesh matrix
+        GPUDrawPushConstants push_constants;
+        push_constants.worldMatrix = r.transform;
+        push_constants.vertexBuffer = r.vertexBufferAddress;
+        vkCmdPushConstants(cmd, metalRoughMaterial.zPrepassPipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &push_constants);
+
+        vkCmdDrawIndexed(cmd, r.indexCount, 1, r.firstIndex, 0, 0);
+
+        // stats
+        stats.drawcall_count++;
+        stats.triangle_count += r.indexCount / 3;
+    };
+
+    VkRenderingInfo zPrepassRenderInfo = vkinit::rendering_info(_drawExtent, nullptr, &preDepth);
+    vkCmdBeginRendering(cmd, &zPrepassRenderInfo);
+
+    for (auto& r : opaque_draws) { // indices into OpaqueSurfaces sorted in order to minimize state changes
+        zPrepass(mainDrawContext.OpaqueSurfaces[r]);
+    }
+
+    vkCmdEndRendering(cmd);
 
     // 3. Find visible clusters
 
@@ -1361,31 +1428,23 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 
     VkClearValue clearValue = { 0.0, 0.0, 0.0, 0.0 };
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(_drawImage.imageView, &clearValue, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); // begin a render pass connected to our draw image
-    VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(_depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    auto mainDepth = vkinit::depth_attachment_info(
+        _depthImage.imageView,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        VK_ATTACHMENT_LOAD_OP_LOAD,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        0.0f, 0
+    );
 
     // --- Actual Render (Skybox Pipeline + PBR Pipeline) ---
 
-    VkRenderingInfo renderInfo = vkinit::rendering_info(_drawExtent, &colorAttachment, &depthAttachment);
+    VkRenderingInfo renderInfo = vkinit::rendering_info(_drawExtent, &colorAttachment, &mainDepth);
     vkCmdBeginRendering(cmd, &renderInfo);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _skyboxPipeline);
 
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-    // scene data (mvp, dir light, ambient light)
-    AllocatedBuffer gpuSceneDataBuffer = create_buffer(sizeof(GPUSceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    GPUSceneData* sceneUniformData = (GPUSceneData*)gpuSceneDataBuffer.allocation->GetMappedData();
-    *sceneUniformData = sceneData;
-    VkDescriptorSet globalDescriptor = get_current_frame()._frameDescriptors.allocate(_device, _gpuSceneDataDescriptorLayout);
-    {
-        DescriptorWriter writer;
-        writer.write_buffer(0, gpuSceneDataBuffer.buffer, sizeof(GPUSceneData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-        writer.update_set(_device, globalDescriptor);
-    }
-    get_current_frame()._deletionQueue.push_function([=, this]() {
-        destroy_buffer(gpuSceneDataBuffer);
-    });
 
     {
         VkDescriptorSet skyboxSets[] = {
@@ -1442,8 +1501,8 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     });
 
     // state tracking, used to avoid redundant re-bindings in consecutive calls to `draw` lambda
-    MaterialPipeline* lastPipeline = nullptr;
-    MaterialInstance* lastMaterial = nullptr;
+    lastPipeline = nullptr;
+    lastMaterial = nullptr;
     lastIndexBuffer = VK_NULL_HANDLE;
 
     auto draw = [&](const RenderObject& r) {
@@ -1743,6 +1802,67 @@ void VulkanEngine::run() {
 
 // GLTF Metal-Roughness functions
 
+void GLTFMetallic_Roughness::build_z_prepass_pipeline(VulkanEngine* engine) {
+    VkShaderModule meshFragShader;
+    if (!vkutil::load_shader_module("../../shaders/z_prepass.frag.spv", engine->_device, &meshFragShader)) {
+        fmt::println("Error when building the Z Pre-pass fragment shader module");
+    }
+
+    VkShaderModule meshVertexShader;
+    if (!vkutil::load_shader_module("../../shaders/z_prepass.vert.spv", engine->_device, &meshVertexShader)) {
+        fmt::println("Error when building the Z Pre-pass vertex shader module");
+    }
+
+    VkPushConstantRange matrixRange{};
+    matrixRange.offset = 0;
+    matrixRange.size = sizeof(GPUDrawPushConstants);
+    matrixRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+    DescriptorLayoutBuilder layoutBuilder;
+    layoutBuilder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // Base Color
+
+    zPrepassLayout = layoutBuilder.build(engine->_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+
+    VkDescriptorSetLayout layouts[] = {
+        engine->_gpuSceneDataDescriptorLayout,
+        zPrepassLayout
+    };
+    VkPipelineLayoutCreateInfo mesh_layout_info = vkinit::pipeline_layout_create_info();
+    mesh_layout_info.setLayoutCount = 2;
+    mesh_layout_info.pSetLayouts = layouts;
+    mesh_layout_info.pPushConstantRanges = &matrixRange;
+    mesh_layout_info.pushConstantRangeCount = 1;
+
+    VkPipelineLayout newLayout;
+    VK_CHECK(vkCreatePipelineLayout(engine->_device, &mesh_layout_info, nullptr, &newLayout));
+
+    zPrepassPipeline.layout = newLayout;
+
+    // build the stage-create-info for both vertex and fragment stages. This lets
+    // the pipeline know the shader modules per stage
+    PipelineBuilder pipelineBuilder;
+    pipelineBuilder.set_shaders(meshVertexShader, meshFragShader);
+    pipelineBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    pipelineBuilder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    pipelineBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    pipelineBuilder.set_multisampling_none();
+    pipelineBuilder.disable_blending();
+    pipelineBuilder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+
+    //render format
+    pipelineBuilder.disable_color_attachments();
+    pipelineBuilder.set_depth_format(engine->_depthImage.imageFormat);
+
+    // use the triangle layout we created
+    pipelineBuilder._pipelineLayout = newLayout;
+
+    // finally build the pipeline
+    zPrepassPipeline.pipeline = pipelineBuilder.build_pipeline(engine->_device);
+
+    vkDestroyShaderModule(engine->_device, meshFragShader, nullptr);
+    vkDestroyShaderModule(engine->_device, meshVertexShader, nullptr);
+}
+
 void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine) {
     VkShaderModule meshFragShader;
     if (!vkutil::load_shader_module("../../shaders/mesh_pbr.frag.spv", engine->_device, &meshFragShader)) {
@@ -1798,7 +1918,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine) {
     pipelineBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
     pipelineBuilder.set_multisampling_none();
     pipelineBuilder.disable_blending();
-    pipelineBuilder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    pipelineBuilder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
 
     //render format
     pipelineBuilder.set_color_attachment_format(engine->_drawImage.imageFormat);
@@ -1825,6 +1945,31 @@ void GLTFMetallic_Roughness::clear_resources(VkDevice device) {
     vkDestroyPipelineLayout(device, transparentPipeline.layout, nullptr); // opaque pipeline uses a handle to the same pipeline layout
     vkDestroyPipeline(device, transparentPipeline.pipeline, nullptr);
     vkDestroyPipeline(device, opaquePipeline.pipeline, nullptr);
+}
+
+MaterialInstance GLTFMetallic_Roughness::write_z_prepass_material(VkDevice device, MaterialPass pass, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator) {
+    MaterialInstance matData;
+
+    // select opaque or transparent pipeline
+    matData.passType = pass;
+    if (pass == MaterialPass::Transparent) {
+        matData.pipeline = &transparentPipeline;
+    }
+    else {
+        matData.pipeline = &opaquePipeline;
+    }
+
+    // alloc. descriptor set
+    matData.materialSet = descriptorAllocator.allocate(device, zPrepassLayout);
+
+    // write material constants (ubo) and material maps (textures+samplers)
+    writer.clear();
+    writer.write_image(0, resources.colorImage.imageView, resources.colorSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+
+    writer.update_set(device, matData.materialSet);
+
+    // return as struct to be used during command buffer recording
+    return matData;
 }
 
 MaterialInstance GLTFMetallic_Roughness::write_material(VkDevice device, MaterialPass pass, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator) {
@@ -1881,6 +2026,8 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx) {
         def.transform = nodeMatrix;
         def.vertexBufferAddress = mesh->meshBuffers.vertexBufferAddress;
         def.bounds = s.bounds;
+
+        def.zPrepassMaterial = &s.material->zPrepassData;
 
         if (s.material->data.passType == MaterialPass::Transparent) {
             ctx.TransparentSurfaces.push_back(def);

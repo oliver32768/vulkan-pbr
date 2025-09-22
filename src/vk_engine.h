@@ -19,8 +19,10 @@ struct EngineStats {
 struct GLTFMetallic_Roughness {
 	MaterialPipeline opaquePipeline;
 	MaterialPipeline transparentPipeline;
-
 	VkDescriptorSetLayout materialLayout;
+
+	MaterialPipeline zPrepassPipeline;
+	VkDescriptorSetLayout zPrepassLayout;
 
 	struct MaterialConstants {
 		glm::vec4 colorFactors;
@@ -53,8 +55,12 @@ struct GLTFMetallic_Roughness {
 
 	DescriptorWriter writer;
 
+	void build_z_prepass_pipeline(VulkanEngine* engine);
+
 	void build_pipelines(VulkanEngine* engine);
 	void clear_resources(VkDevice device);
+
+	MaterialInstance write_z_prepass_material(VkDevice device, MaterialPass pass, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator);
 
 	MaterialInstance write_material(VkDevice device, MaterialPass pass, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator);
 };
@@ -71,6 +77,7 @@ struct RenderObject {
 	VkBuffer indexBuffer;
 
 	MaterialInstance* material;
+	MaterialInstance* zPrepassMaterial;
 	
 	glm::mat4 transform;
 	VkDeviceAddress vertexBufferAddress;
@@ -79,7 +86,7 @@ struct RenderObject {
 };
 
 // render 'passes' (not the vulkan ones)
-// change drawgeometry respectively!
+// change drawgeometry respectively
 struct DrawContext {
 	std::vector<RenderObject> OpaqueSurfaces;
 	std::vector<RenderObject> TransparentSurfaces;
