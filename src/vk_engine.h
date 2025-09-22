@@ -265,6 +265,22 @@ struct LightParams {
 	uint32_t useClusters;
 };
 
+struct ClusterBuilderPushConstantsIn {
+	float nearPlane;
+	float farPlane;
+};
+
+struct ClusterBuilderIn {
+	glm::mat4 invProj;
+	glm::uvec4 tileSizes; // stores tile size in pixel in screenspace in .w component
+	glm::uvec4 screenDimensions; // .yw for alignment padding
+};
+
+struct ClusterBuilderOut {
+	glm::vec4 minPoint;
+	glm::vec4 maxPoint;
+};
+
 struct ClusteredLightResources {
 	DescriptorAllocatorGrowable descriptorAllocator;
 	VkDescriptorSetLayout setLayout{};
@@ -274,6 +290,20 @@ struct ClusteredLightResources {
 	std::vector<uint32_t> offsets;
 	std::vector<uint32_t> indices;
 	LightParams lightParams{};
+
+	// --- Cluster builder ---
+	// CPU Side data
+	ClusterBuilderPushConstantsIn builderPC;
+	ClusterBuilderIn builderIn;
+	ClusterBuilderOut builderOut;
+	uint32_t numClusters;
+	glm::uvec3 tiles;
+	// Pipeline + Descriptor
+	VkDescriptorSetLayout builderSetLayout{};
+	VkPipelineLayout builderPipelineLayout{};
+	VkPipeline builderPipeline{};
+	VkDescriptorSet builderSet{};
+	
 };
 
 class VulkanEngine {
@@ -282,6 +312,8 @@ public:
 	double deltaTime;
 	EngineStats stats;
 	std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
+	float nearPlane;
+	float farPlane;
 
 	float mAzimuth = glm::radians(180.0f);
 	float mZenith = glm::radians(20.0f);
@@ -379,6 +411,12 @@ public:
 	
 	void draw();
 	void run();
+
+	AllocatedBuffer build_cluster_grid();
+
+	void update_cluster_size(uint32_t tileSizePx, uint32_t numZSlices);
+
+	void init_cluster_building_compute_pipeline();
 
 	void init_point_light_descriptor_set();
 

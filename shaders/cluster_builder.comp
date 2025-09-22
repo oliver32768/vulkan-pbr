@@ -1,0 +1,86 @@
+#version 460 core
+layout(local_size_x = 1, local_size_y = 1) in;
+
+struct ClusterOut {
+    vec4 minPoint;
+    vec4 maxPoint;
+};
+
+layout (std430, set = 0, binding = 0) buffer ClusterAABB {
+    ClusterOut cluster[];
+};
+
+layout (std140, set = 0, binding = 1) uniform ClusterParams {
+    mat4 inverseProjection;
+    uvec4 tileSizes;
+    uvec2 screenDimensions;
+};
+
+layout (push_constant) uniform constants {
+    float zNear;
+    float zFar;
+} pc;
+
+vec3 intersectXYPlane(vec3 A, vec3 B, float zDistance) {
+    vec3 normal = vec3(0.0, 0.0, 1.0);
+    vec3 ab =  B - A;
+    float t = (zDistance - dot(normal, A)) / dot(normal, ab);
+    vec3 result = A + t * ab;
+    return result;
+}
+ 
+vec4 clipToView(vec4 clip) {
+    vec4 view = inverseProjection * clip;
+    view = view / view.w;
+    return view;
+}
+
+vec4 screenToView(vec4 screen) {
+    // screen.xy is in pixels (origin at top-left in Vulkan)
+    vec2 ndc;
+    ndc.x = (screen.x / float(screenDimensions.x)) * 2.0 - 1.0;
+    ndc.y = 1.0 - (screen.y / float(screenDimensions.y)) * 2.0; // flip Y for Vulkan
+
+    float ndcZ = screen.z; // expect caller to pass 0.0 for near in Vulkan
+    vec4 clip = vec4(ndc, ndcZ, screen.w);
+    return clipToView(clip);
+}
+
+void main() {
+    const vec3 eyePos = vec3(0.0); // view space
+
+    uint tileSizePx = tileSizes[3];
+    uint tileIndex = gl_WorkGroupID.x +
+                     gl_WorkGroupID.y * gl_NumWorkGroups.x +
+                     gl_WorkGroupID.z * (gl_NumWorkGroups.x * gl_NumWorkGroups.y);
+
+    // screen space tile min/max
+    // z = -1, w = 1
+    vec4 maxPoint_sS = vec4(vec2(gl_WorkGroupID.x + 1, gl_WorkGroupID.y + 1) * tileSizePx, 0.0, 1.0); // [0,1] NDC in Vulkan
+    vec4 minPoint_sS = vec4(gl_WorkGroupID.xy * tileSizePx, 0.0, 1.0); 
+    
+    // to view
+    vec3 maxPoint_vS = screenToView(maxPoint_sS).xyz;
+    vec3 minPoint_vS = screenToView(minPoint_sS).xyz;
+
+    // near/far plane of cluster (view space)
+    float tileNear = -pc.zNear * pow(pc.zFar / pc.zNear, gl_WorkGroupID.z / float(gl_NumWorkGroups.z));
+    float tileFar = -pc.zNear * pow(pc.zFar / pc.zNear, (gl_WorkGroupID.z + 1) / float(gl_NumWorkGroups.z));
+
+    // intersections of ray towards _min_ coord of froxel AABB with xy plane containing near/far plane of froxel AABB respectively
+    vec3 minPointNear = intersectXYPlane(eyePos, minPoint_vS, tileNear);
+    vec3 minPointFar = intersectXYPlane(eyePos, minPoint_vS, tileFar);
+
+    // intersections of ray towards _max_ coord of froxel AABB with xy plane containing near/far plane of froxel AABB respectively
+    vec3 maxPointNear = intersectXYPlane(eyePos, maxPoint_vS, tileNear);
+    vec3 maxPointFar = intersectXYPlane(eyePos, maxPoint_vS, tileFar);
+
+    // Pad AABB
+    vec3 minPointAABB = min(min(minPointNear, minPointFar), min(maxPointNear, maxPointFar));
+    vec3 maxPointAABB = max(max(minPointNear, minPointFar), max(maxPointNear, maxPointFar));
+
+    // Write result
+    cluster[tileIndex].minPoint = vec4(minPointAABB , 0.0);
+    cluster[tileIndex].maxPoint = vec4(maxPointAABB , 0.0);
+}
+

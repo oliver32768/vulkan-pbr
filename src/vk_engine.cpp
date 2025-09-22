@@ -1097,6 +1097,9 @@ void VulkanEngine::init() {
 
     init_point_light_descriptor_set();
 
+    update_cluster_size(120, 24);
+    init_cluster_building_compute_pipeline();
+
     init_pipelines();
 
     init_imgui();
@@ -1107,7 +1110,7 @@ void VulkanEngine::init() {
     mainCamera.pitch = 0.0;
     mainCamera.yaw = 1.5;
 
-    addRandomPointLightsInRect(64, glm::vec2(-20.0f, -20.0f), glm::vec2(20.0f, 20.0f));
+    addRandomPointLightsInRect(512, glm::vec2(-20.0f, -20.0f), glm::vec2(20.0f, 20.0f));
 
     std::string helmetPath = { "..\\..\\assets\\DamagedHelmet.glb" };
     auto helmetFile = loadGltf(this, helmetPath);
@@ -1173,9 +1176,9 @@ void VulkanEngine::update_scene() {
 
     mainCamera.update(deltaTime);
     sceneData.view = mainCamera.getViewMatrix();
-    float near = 0.1;
-    float far = 100.0;
-    sceneData.proj = glm::perspective(glm::radians(70.f), (float)_windowExtent.width / (float)_windowExtent.height, far, near);
+    nearPlane = 0.1;
+    farPlane = 100.0;
+    sceneData.proj = glm::perspective(glm::radians(70.f), (float)_windowExtent.width / (float)_windowExtent.height, farPlane, nearPlane);
     sceneData.proj[1][1] *= -1;
     sceneData.viewproj = sceneData.proj * sceneData.view;
     sceneData.ambientColor = glm::vec4(.1f);
@@ -1190,8 +1193,8 @@ void VulkanEngine::update_scene() {
     sceneData.sunlightDirection = glm::vec4(sunDir, 0.0f);
 
     float lambda = 0.7f;
-    _shadowRes.cascadePlanes = buildCascadePlanes(_shadowRes.numCascades, near, far, lambda);
-    std::vector<LightInfo> cascades = getLightSpaceMatrices(_shadowRes.numCascades, _shadowRes.cascadePlanes, near, far, sceneData.view, sceneData.sunlightDirection);
+    _shadowRes.cascadePlanes = buildCascadePlanes(_shadowRes.numCascades, nearPlane, farPlane, lambda);
+    std::vector<LightInfo> cascades = getLightSpaceMatrices(_shadowRes.numCascades, _shadowRes.cascadePlanes, nearPlane, farPlane, sceneData.view, sceneData.sunlightDirection);
     std::vector<GPUShadowMapData> cascadeData{};
     std::vector<glm::vec2> orthoDims{};
     for (int i = 0; i < cascades.size(); ++i) {
@@ -1206,6 +1209,9 @@ void VulkanEngine::update_scene() {
     _shadowRes.orthoDims = orthoDims;
 
     _lightRes.lightParams.lightCount = _lightRes.lights.size();
+    _lightRes.builderIn.invProj = glm::inverse(sceneData.proj);
+    _lightRes.builderIn.screenDimensions = glm::uvec4(_windowExtent.width, _windowExtent.height, 0, 0);
+    update_cluster_size(120, 24);
 
     auto end = std::chrono::system_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -1254,11 +1260,41 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     shadowViewport.minDepth = 0.f;
     shadowViewport.maxDepth = 1.f;
 
+    VkViewport viewport = {}; 
+    viewport.x = 0;
+    viewport.y = 0;
+    viewport.width = _drawExtent.width;
+    viewport.height = _drawExtent.height;
+    viewport.minDepth = 0.f;
+    viewport.maxDepth = 1.f;
+
     VkRect2D shadowScissor = {};
     shadowScissor.offset.x = 0;
     shadowScissor.offset.y = 0;
     shadowScissor.extent.width = 1024;
     shadowScissor.extent.height = 1024;
+
+    VkRect2D scissor = {};
+    scissor.offset.x = 0;
+    scissor.offset.y = 0;
+    scissor.extent.width = _drawExtent.width;
+    scissor.extent.height = _drawExtent.height;
+
+    // --- Cluster Building Compute Pipeline ---
+
+    // 1. Build cluster grid
+    // TODO: Only run this if frustum changes shape, not every frame
+    AllocatedBuffer froxelAABBs = build_cluster_grid();
+
+    // 2. Z pre-pass
+
+    // 3. Find visible clusters
+
+    // 4. Deduplicate clusters
+
+    // 5. Light binning (the actual clustering part)
+
+    // --- CSM Depth Pre-Pass ---
 
     auto drawShadowPrepass = [&](const RenderObject& r) {
         // rebind index buffer if needed. != operator here is just comparing handles
@@ -1282,7 +1318,6 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 
     vkutil::transition_image(cmd, _shadowRes.shadowMap.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
-    // For each cascade:
     for (uint32_t c = 0; c < _shadowRes.numCascades; ++c) {
         // Begin rendering to layer c
         VkRenderingAttachmentInfo depthAtt = vkinit::depth_attachment_info(_shadowRes.layerViews[c], VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
@@ -1328,25 +1363,14 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(_drawImage.imageView, &clearValue, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); // begin a render pass connected to our draw image
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(_depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
+    // --- Actual Render (Skybox Pipeline + PBR Pipeline) ---
+
     VkRenderingInfo renderInfo = vkinit::rendering_info(_drawExtent, &colorAttachment, &depthAttachment);
     vkCmdBeginRendering(cmd, &renderInfo);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _skyboxPipeline);
 
-    VkViewport viewport = {}; // need to have some pipeline bound before specifying dynamic state. I don't think it matters which here?
-    viewport.x = 0;
-    viewport.y = 0;
-    viewport.width = _drawExtent.width;
-    viewport.height = _drawExtent.height;
-    viewport.minDepth = 0.f;
-    viewport.maxDepth = 1.f;
     vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-    VkRect2D scissor = {};
-    scissor.offset.x = 0;
-    scissor.offset.y = 0;
-    scissor.extent.width = _drawExtent.width;
-    scissor.extent.height = _drawExtent.height;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     // scene data (mvp, dir light, ambient light)
@@ -1869,6 +1893,88 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx) {
 
     // recurse down
     Node::Draw(topMatrix, ctx);
+}
+
+// Clustered Shading
+
+AllocatedBuffer VulkanEngine::build_cluster_grid() {
+    size_t outBufSize = _lightRes.numClusters * sizeof(ClusterBuilderOut);
+    AllocatedBuffer outBuf = create_buffer(outBufSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY); // this will only be used by other shaders
+
+    size_t inBufSize = sizeof(ClusterBuilderIn);
+    AllocatedBuffer inBuf = create_buffer(inBufSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto* inBufPtr = reinterpret_cast<ClusterBuilderIn*>(inBuf.allocation->GetMappedData());
+    *inBufPtr = _lightRes.builderIn;
+    //vmaFlushAllocation(allocator, inBuf.allocation, 0, inBufSize);
+
+    _lightRes.builderSet = _lightRes.descriptorAllocator.allocate(_device, _lightRes.builderSetLayout);
+    {
+        DescriptorWriter writer;
+        writer.write_buffer(0, outBuf.buffer, outBufSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(1, inBuf.buffer, inBufSize, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        writer.update_set(_device, _lightRes.builderSet);
+    }
+    get_current_frame()._deletionQueue.push_function([=, this] {
+        destroy_buffer(outBuf);
+        destroy_buffer(inBuf);
+    });
+
+    immediate_submit([&](VkCommandBuffer cmd) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _lightRes.builderPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _lightRes.builderPipelineLayout, 0, 1, &_lightRes.builderSet, 0, nullptr);
+
+        ClusterBuilderPushConstantsIn pc;
+        pc.nearPlane = nearPlane;
+        pc.farPlane = farPlane;
+        vkCmdPushConstants(cmd, _lightRes.builderPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ClusterBuilderPushConstantsIn), &pc);
+
+        vkCmdDispatch(cmd, _lightRes.tiles.x, _lightRes.tiles.y, _lightRes.tiles.z);
+    });
+
+    return outBuf;
+}
+
+void VulkanEngine::update_cluster_size(uint32_t tileSizePx, uint32_t numZSlices) {
+    _lightRes.builderIn.tileSizes[3] = tileSizePx;
+    _lightRes.tiles.x = (_windowExtent.width + tileSizePx - 1) / tileSizePx;
+    _lightRes.tiles.y = (_windowExtent.height + tileSizePx - 1) / tileSizePx;
+    _lightRes.tiles.z = numZSlices;
+    _lightRes.numClusters = _lightRes.tiles.x * _lightRes.tiles.y * _lightRes.tiles.z;
+}
+
+void VulkanEngine::init_cluster_building_compute_pipeline() {
+    DescriptorLayoutBuilder b;
+    b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // array of froxel AABBs (output)
+    b.add_binding(1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER); // inv proj, tile size, screen dims (input)
+    _lightRes.builderSetLayout = b.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
+
+    VkPushConstantRange pc{};
+    pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pc.size = sizeof(ClusterBuilderPushConstantsIn); // 
+    pc.offset = 0;
+
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &_lightRes.builderSetLayout;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pc;
+    VK_CHECK(vkCreatePipelineLayout(_device, &plci, nullptr, &_lightRes.builderPipelineLayout));
+
+    // shader & pipeline
+    VkShaderModule cs;
+    if (!(vkutil::load_shader_module("../../shaders/cluster_builder.comp.spv", _device, &cs))) {
+        fmt::print("Error when building the cluster builder compute shader \n");
+    }
+    VkComputePipelineCreateInfo cpci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+    cpci.layout = _lightRes.builderPipelineLayout;
+    cpci.stage = VkPipelineShaderStageCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = cs,
+        .pName = "main"
+    };
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &_lightRes.builderPipeline));
+    vkDestroyShaderModule(_device, cs, nullptr);
 }
 
 // Point lights
