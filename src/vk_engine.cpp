@@ -1361,7 +1361,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     // 3. Find visible clusters
     AllocatedBuffer activeClusterBitset = determine_active_clusters(cmd);
 
-    // 4. Deduplicate clusters
+    // 4. Optimize cluster structure
 
     // 5. Light binning (the actual clustering part)
 
@@ -2103,8 +2103,13 @@ AllocatedBuffer VulkanEngine::determine_active_clusters(VkCommandBuffer cmd) {
         VK_IMAGE_ASPECT_DEPTH_BIT
     );
 
-    size_t outBufSize = _lightRes.numClusters * sizeof(uint32_t);
-    AllocatedBuffer outBuf = create_buffer(outBufSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY); // this will only be used by other shaders
+    size_t outBufSize = ((_lightRes.numClusters + 31u) / 32u) * sizeof(uint32_t);
+    AllocatedBuffer outBuf = create_buffer(
+        outBufSize, 
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, // Need to 0 initialise it. I feel like this is dumb
+        VMA_MEMORY_USAGE_GPU_ONLY // this will only be used by other shaders
+    ); 
+    vkCmdFillBuffer(cmd, outBuf.buffer, 0, outBufSize, 0u);
 
     size_t inBufSize = sizeof(ClusterBuilderIn);
     AllocatedBuffer inBuf = create_buffer(inBufSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -2147,7 +2152,7 @@ AllocatedBuffer VulkanEngine::determine_active_clusters(VkCommandBuffer cmd) {
         VK_IMAGE_ASPECT_DEPTH_BIT
     );
 
-    return outBuf; // active clusters uint array
+    return outBuf; // active clusters bitfield
 }
 
 AllocatedBuffer VulkanEngine::build_cluster_grid(VkCommandBuffer cmd) {

@@ -1,0 +1,62 @@
+#version 460
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in; // Each invocation scans one 32-bit word from clusterActiveBits
+
+// Input: bitfield of active clusters (32 clusters per uint)
+layout (std430, set = 0, binding = 0) buffer SSBO_clusterActiveBits {
+    uint clusterActiveBits[]; // length = ceil(numClusters / 32)
+};
+
+// Output: compact list of active cluster indices
+layout (std430, set = 0, binding = 1) buffer SSBO_uniqueActiveClusters {
+    uint uniqueActiveClusters[]; // length = numClusters
+};
+
+// Output: global counter (host must zero this before dispatch)
+layout (std430, set = 0, binding = 2) buffer SSBO_activeCount {
+    uint globalActiveClusterCount; 
+};
+
+// Params
+layout (std140, set = 0, binding = 3) uniform UBO_clusterParams {
+    mat4 inverseProjection;
+    uvec4 tileSizes; // numTiles.xyz, tileSizeInPx.w (square tiles)
+    uvec2 screenDimensions;
+};
+
+void main() {
+    // Compute total clusters and number of 32-bit words in the bitfield
+    const uint numClusters = tileSizes.x * tileSizes.y * tileSizes.z;
+    const uint words = (numClusters + 31u) >> 5; // ceil(numClusters/32)
+
+    uint wordIndex = gl_GlobalInvocationID.x;
+    if (wordIndex >= words) return;
+
+    // Load word
+    uint bits = clusterActiveBits[wordIndex];
+
+    // Mask out padding bits in the final word (if numClusters is not a multiple of 32)
+    if (wordIndex == words - 1u) {
+        uint validBits = numClusters - (wordIndex << 5); // numClusters - wordIndex*32
+        if (validBits < 32u) {
+            uint mask = (validBits == 0u) ? 0u : ((1u << validBits) - 1u);
+            bits &= mask;
+        }
+    }
+
+    // Early out if no bits set
+    if (bits == 0u) return;
+
+    // Iterate set bits efficiently: clear the least-significant set bit each step
+    // GLSL has findLSB() and bitCount() in 4.30+; we use findLSB for exact index.
+    while (bits != 0u) {
+        uint lsbIndex = findLSB(bits); // 0..31
+        uint clusterIndex = (wordIndex << 5) + lsbIndex; // word*32 + bit
+
+        // Append to the compact list
+        uint dst = atomicAdd(globalActiveClusterCount, 1u);
+        uniqueActiveClusters[dst] = clusterIndex;
+
+        // Clear that bit and continue
+        bits &= (bits - 1u);
+    }
+}
