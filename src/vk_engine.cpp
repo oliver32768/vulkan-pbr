@@ -1104,6 +1104,8 @@ void VulkanEngine::init() {
 
     init_active_cluster_compute_pipeline();
 
+    init_compact_cluster_pipeline();
+
     init_pipelines();
 
     init_imgui();
@@ -1362,6 +1364,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     AllocatedBuffer activeClusterBitset = determine_active_clusters(cmd);
 
     // 4. Optimize cluster structure
+    CompactActiveClusters compactActiveClusters = compact_active_clusters(cmd, activeClusterBitset);
 
     // 5. Light binning (the actual clustering part)
 
@@ -2048,6 +2051,120 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx) {
 
 // Clustered Shading
 
+CompactActiveClusters VulkanEngine::compact_active_clusters(VkCommandBuffer cmd, AllocatedBuffer activeClusterBitfield) {
+    size_t activeClusterBitfieldSize = ((_lightRes.numClusters + 31u) / 32u) * sizeof(uint32_t);
+    
+    size_t activeClustersBufSize = _lightRes.numClusters * sizeof(uint32_t); // TODO: I really should not be allocating this every frame ffs
+    AllocatedBuffer activeClustersBuf = create_buffer(activeClustersBufSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,  VMA_MEMORY_USAGE_GPU_ONLY);
+
+    size_t numActiveClustersBufSize = sizeof(uint32_t);
+    AllocatedBuffer numActiveClustersBuf = create_buffer(
+        numActiveClustersBufSize, 
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY
+    );
+    vkCmdFillBuffer(cmd, numActiveClustersBuf.buffer, 0, numActiveClustersBufSize, 0u);
+
+    size_t inBufSize = sizeof(ClusterBuilderIn);
+    AllocatedBuffer inBuf = create_buffer(inBufSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto* inBufPtr = reinterpret_cast<ClusterBuilderIn*>(inBuf.allocation->GetMappedData());
+    *inBufPtr = _lightRes.builderIn;
+
+    _lightRes.compactSet = _lightRes.descriptorAllocator.allocate(_device, _lightRes.compactSetLayout);
+    {
+        DescriptorWriter writer;
+        writer.write_buffer(0, activeClusterBitfield.buffer, activeClusterBitfieldSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(1, activeClustersBuf.buffer, activeClustersBufSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(2, numActiveClustersBuf.buffer, numActiveClustersBufSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(3, inBuf.buffer, inBufSize, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        writer.update_set(_device, _lightRes.compactSet);
+    }
+    get_current_frame()._deletionQueue.push_function([=, this] {
+        destroy_buffer(activeClustersBuf);
+        destroy_buffer(numActiveClustersBuf);
+        destroy_buffer(inBuf);
+    });
+
+    {
+        VkBufferMemoryBarrier2 barriers[2] = {
+            { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 }, // bitfield in
+            { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 }, // counter out
+        };
+
+        // Bitfield produced by previous compute pass
+        barriers[0].buffer = activeClusterBitfield.buffer;
+        barriers[0].srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barriers[0].srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+        barriers[0].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barriers[0].dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+        barriers[0].offset = 0;
+        barriers[0].size = VK_WHOLE_SIZE;
+
+        // Counter was just cleared by transfer
+        barriers[1].buffer = numActiveClustersBuf.buffer;
+        barriers[1].srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        barriers[1].srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        barriers[1].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barriers[1].dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+        barriers[1].offset = 0;
+        barriers[1].size = VK_WHOLE_SIZE;
+
+        VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        dep.bufferMemoryBarrierCount = 2;
+        dep.pBufferMemoryBarriers = barriers;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    }
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _lightRes.compactPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _lightRes.compactPipelineLayout, 0, 1, &_lightRes.compactSet, 0, nullptr);
+
+    assert((activeClusterBitfieldSize & 3u) == 0);
+
+    const uint32_t words = uint32_t(activeClusterBitfieldSize / 4u);
+    const uint32_t WG_SIZE = 256; // must match the shader's local_size_x
+    const uint32_t groupsX = (words + WG_SIZE - 1u) / WG_SIZE;
+
+    vkCmdDispatch(cmd, groupsX, 1, 1);
+
+    CompactActiveClusters ret{};
+    ret.ActiveClusterCount = numActiveClustersBuf;
+    ret.ActiveClusterList = activeClustersBuf;
+
+    return ret; 
+}
+
+void VulkanEngine::init_compact_cluster_pipeline() {
+    DescriptorLayoutBuilder b;
+    b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // active cluster bitfield
+    b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // unique active cluster array (output)
+    b.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // active cluster count (output)
+    b.add_binding(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER); // inv proj, tile size, screen dims
+    _lightRes.compactSetLayout = b.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
+
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &_lightRes.compactSetLayout;
+    plci.pushConstantRangeCount = 0;
+    plci.pPushConstantRanges = nullptr;
+    VK_CHECK(vkCreatePipelineLayout(_device, &plci, nullptr, &_lightRes.compactPipelineLayout));
+
+    // shader & pipeline
+    VkShaderModule cs;
+    if (!(vkutil::load_shader_module("../../shaders/compact_clusters.comp.spv", _device, &cs))) {
+        fmt::print("Error when building the compact cluster compute shader \n");
+    }
+    VkComputePipelineCreateInfo cpci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+    cpci.layout = _lightRes.compactPipelineLayout;
+    cpci.stage = VkPipelineShaderStageCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = cs,
+        .pName = "main"
+    };
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &_lightRes.compactPipeline));
+    vkDestroyShaderModule(_device, cs, nullptr);
+}
+
 void VulkanEngine::init_active_cluster_compute_pipeline() {
     DescriptorLayoutBuilder b;
     b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // active clusters (array of u32, 32 clusters per)
@@ -2129,6 +2246,23 @@ AllocatedBuffer VulkanEngine::determine_active_clusters(VkCommandBuffer cmd) {
         destroy_buffer(outBuf);
         destroy_buffer(inBuf);
     });
+
+    {
+        VkBufferMemoryBarrier2 barrier{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 };
+
+        barrier.buffer = outBuf.buffer;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+        barrier.offset = 0;
+        barrier.size = VK_WHOLE_SIZE;
+
+        VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        dep.bufferMemoryBarrierCount = 1;
+        dep.pBufferMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    }
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _lightRes.activePipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _lightRes.activePipelineLayout, 0, 1, &_lightRes.activeSet, 0, nullptr);

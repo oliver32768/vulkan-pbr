@@ -288,6 +288,11 @@ struct ClusterBuilderOut {
 	glm::vec4 maxPoint;
 };
 
+struct CompactActiveClusters {
+	AllocatedBuffer ActiveClusterList;
+	AllocatedBuffer ActiveClusterCount;
+};
+
 struct ClusteredLightResources {
 	DescriptorAllocatorGrowable descriptorAllocator;
 	VkDescriptorSetLayout setLayout{};
@@ -319,6 +324,13 @@ struct ClusteredLightResources {
 	VkPipelineLayout	  activePipelineLayout{};
 	VkPipeline		      activePipeline{};
 	VkDescriptorSet		  activeSet{};
+
+	// --- Compacting Active Clusters ---
+	// Pipeline + Descriptor
+	VkDescriptorSetLayout compactSetLayout{};
+	VkPipelineLayout	  compactPipelineLayout{};
+	VkPipeline		      compactPipeline{};
+	VkDescriptorSet		  compactSet{};
 	
 };
 
@@ -348,7 +360,7 @@ public:
 	bool _isInitialized{ false };
 	int _frameNumber{ 0 };
 	bool stop_rendering{ false };
-	VkExtent2D _windowExtent{ 1700 , 900 };
+	VkExtent2D _windowExtent{ 1600 , 900 };
 	struct SDL_Window* _window{ nullptr }; // forward declaration
 
 	VkInstance _instance;
@@ -427,6 +439,10 @@ public:
 	
 	void draw();
 	void run();
+
+	CompactActiveClusters compact_active_clusters(VkCommandBuffer cmd, AllocatedBuffer activeClusterBitfield);
+
+	void init_compact_cluster_pipeline();
 
 	void init_active_cluster_compute_pipeline();
 
