@@ -961,6 +961,7 @@ void VulkanEngine::init_swapchain() {
     _depthImage.imageExtent = drawImageExtent;
     VkImageUsageFlags depthImageUsages{};
     depthImageUsages |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    depthImageUsages |= VK_IMAGE_USAGE_SAMPLED_BIT; // For compute shaders. Is this even allowed
 
     VkImageCreateInfo dimg_info = vkinit::image_create_info(_depthImage.imageFormat, depthImageUsages, drawImageExtent);
 
@@ -1100,6 +1101,8 @@ void VulkanEngine::init() {
 
     update_cluster_size(120, 24);
     init_cluster_building_compute_pipeline();
+
+    init_active_cluster_compute_pipeline();
 
     init_pipelines();
 
@@ -1298,7 +1301,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 
     // 1. Build cluster grid
     // TODO: Only run this if frustum changes shape, not every frame
-    AllocatedBuffer froxelAABBs = build_cluster_grid();
+    AllocatedBuffer froxelAABBs = build_cluster_grid(cmd);
 
     // 2. Z pre-pass
 
@@ -1356,6 +1359,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     vkCmdEndRendering(cmd);
 
     // 3. Find visible clusters
+    AllocatedBuffer activeClusterBitset = determine_active_clusters(cmd);
 
     // 4. Deduplicate clusters
 
@@ -2044,7 +2048,109 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx) {
 
 // Clustered Shading
 
-AllocatedBuffer VulkanEngine::build_cluster_grid() {
+void VulkanEngine::init_active_cluster_compute_pipeline() {
+    DescriptorLayoutBuilder b;
+    b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // active clusters (array of u32, 32 clusters per)
+    b.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // depth buffer from prepass
+    b.add_binding(2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER); // inv proj, tile size, screen dims
+    _lightRes.activeSetLayout = b.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
+
+    VkPushConstantRange pc{};
+    pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pc.size = sizeof(ClusterBuilderPushConstantsIn); 
+    pc.offset = 0;
+
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &_lightRes.activeSetLayout;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pc;
+    VK_CHECK(vkCreatePipelineLayout(_device, &plci, nullptr, &_lightRes.activePipelineLayout));
+
+    // shader & pipeline
+    VkShaderModule cs;
+    if (!(vkutil::load_shader_module("../../shaders/active_cluster.comp.spv", _device, &cs))) {
+        fmt::print("Error when building the active cluster compute shader \n");
+    }
+    VkComputePipelineCreateInfo cpci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+    cpci.layout = _lightRes.activePipelineLayout;
+    cpci.stage = VkPipelineShaderStageCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = cs,
+        .pName = "main"
+    };
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &_lightRes.activePipeline));
+    vkDestroyShaderModule(_device, cs, nullptr);
+
+    VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    sci.magFilter = VK_FILTER_NEAREST;
+    sci.minFilter = VK_FILTER_NEAREST;
+    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.maxLod = 0.0f; // no mips on a depth buffer
+    sci.compareEnable = VK_FALSE; // set TRUE + sampler2DShadow only if doing PCF/compare
+    VK_CHECK(vkCreateSampler(_device, &sci, nullptr, &_lightRes.depthSampler));
+}
+
+AllocatedBuffer VulkanEngine::determine_active_clusters(VkCommandBuffer cmd) {
+    vkutil::transition_image(cmd, 
+        _depthImage.image, 
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_ASPECT_DEPTH_BIT
+    );
+
+    size_t outBufSize = _lightRes.numClusters * sizeof(uint32_t);
+    AllocatedBuffer outBuf = create_buffer(outBufSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY); // this will only be used by other shaders
+
+    size_t inBufSize = sizeof(ClusterBuilderIn);
+    AllocatedBuffer inBuf = create_buffer(inBufSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto* inBufPtr = reinterpret_cast<ClusterBuilderIn*>(inBuf.allocation->GetMappedData());
+    *inBufPtr = _lightRes.builderIn;
+    //vmaFlushAllocation(allocator, inBuf.allocation, 0, inBufSize);
+
+    _lightRes.activeSet = _lightRes.descriptorAllocator.allocate(_device, _lightRes.activeSetLayout);
+    {
+        DescriptorWriter writer;
+        writer.write_buffer(0, outBuf.buffer, outBufSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_image(1, _depthImage.imageView, _lightRes.depthSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.write_buffer(2, inBuf.buffer, inBufSize, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        writer.update_set(_device, _lightRes.activeSet);
+    }
+    get_current_frame()._deletionQueue.push_function([=, this] {
+        destroy_buffer(outBuf);
+        destroy_buffer(inBuf);
+    });
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _lightRes.activePipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _lightRes.activePipelineLayout, 0, 1, &_lightRes.activeSet, 0, nullptr);
+
+    ClusterBuilderPushConstantsIn pc;
+    pc.nearPlane = nearPlane;
+    pc.farPlane = farPlane;
+    vkCmdPushConstants(cmd, _lightRes.activePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ClusterBuilderPushConstantsIn), &pc);
+
+    // dispatch over screen pixels, since we need to test all pixels to know which clusters are active
+    uint32_t local_size = 16;
+    uint32_t groupsX = (_windowExtent.width + local_size - 1) / local_size;
+    uint32_t groupsY = (_windowExtent.height + local_size - 1) / local_size;
+
+    vkCmdDispatch(cmd, groupsX, groupsY, 1);
+
+    vkutil::transition_image(cmd,
+        _depthImage.image,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_ASPECT_DEPTH_BIT
+    );
+
+    return outBuf; // active clusters uint array
+}
+
+AllocatedBuffer VulkanEngine::build_cluster_grid(VkCommandBuffer cmd) {
     size_t outBufSize = _lightRes.numClusters * sizeof(ClusterBuilderOut);
     AllocatedBuffer outBuf = create_buffer(outBufSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY); // this will only be used by other shaders
 
@@ -2066,27 +2172,29 @@ AllocatedBuffer VulkanEngine::build_cluster_grid() {
         destroy_buffer(inBuf);
     });
 
-    immediate_submit([&](VkCommandBuffer cmd) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _lightRes.builderPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _lightRes.builderPipelineLayout, 0, 1, &_lightRes.builderSet, 0, nullptr);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _lightRes.builderPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _lightRes.builderPipelineLayout, 0, 1, &_lightRes.builderSet, 0, nullptr);
 
-        ClusterBuilderPushConstantsIn pc;
-        pc.nearPlane = nearPlane;
-        pc.farPlane = farPlane;
-        vkCmdPushConstants(cmd, _lightRes.builderPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ClusterBuilderPushConstantsIn), &pc);
+    ClusterBuilderPushConstantsIn pc;
+    pc.nearPlane = nearPlane;
+    pc.farPlane = farPlane;
+    vkCmdPushConstants(cmd, _lightRes.builderPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ClusterBuilderPushConstantsIn), &pc);
 
-        vkCmdDispatch(cmd, _lightRes.tiles.x, _lightRes.tiles.y, _lightRes.tiles.z);
-    });
+    vkCmdDispatch(cmd, _lightRes.builderIn.tileSizes.x, _lightRes.builderIn.tileSizes.y, _lightRes.builderIn.tileSizes.z);
 
     return outBuf;
 }
 
 void VulkanEngine::update_cluster_size(uint32_t tileSizePx, uint32_t numZSlices) {
-    _lightRes.builderIn.tileSizes[3] = tileSizePx;
-    _lightRes.tiles.x = (_windowExtent.width + tileSizePx - 1) / tileSizePx;
-    _lightRes.tiles.y = (_windowExtent.height + tileSizePx - 1) / tileSizePx;
-    _lightRes.tiles.z = numZSlices;
-    _lightRes.numClusters = _lightRes.tiles.x * _lightRes.tiles.y * _lightRes.tiles.z;
+    _lightRes.builderIn.tileSizes.x = (_windowExtent.width + tileSizePx - 1) / tileSizePx;
+    _lightRes.builderIn.tileSizes.y = (_windowExtent.height + tileSizePx - 1) / tileSizePx;
+    _lightRes.builderIn.tileSizes.z = numZSlices;
+    _lightRes.builderIn.tileSizes.w = tileSizePx;
+
+    _lightRes.numClusters = 
+        _lightRes.builderIn.tileSizes.x 
+        * _lightRes.builderIn.tileSizes.y 
+        * _lightRes.builderIn.tileSizes.z;
 }
 
 void VulkanEngine::init_cluster_building_compute_pipeline() {
@@ -2136,7 +2244,8 @@ void VulkanEngine::init_point_light_descriptor_set() {
 
     DescriptorAllocatorGrowable::PoolSizeRatio sizes[] = {
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8.0f },
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8.0f }
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8.0f },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8.0f }
     };
     _lightRes.descriptorAllocator = DescriptorAllocatorGrowable{};
     _lightRes.descriptorAllocator.init(_device, 64, std::span(sizes));

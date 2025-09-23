@@ -1,0 +1,80 @@
+/*
+Requires:
+- screenDimensions: UBO (vec4)
+- numTiles XYZ + tileSizeInPx: UBO (vec4)
+- clusterActive[]: SSBO
+- Z-Buffer: Sampler2D
+- zNear / zFar: PC
+
+- pixelID: Computed using gid
+- pixelCoord: Computed using pixelID
+- numClusters: Computed using prod(numTiles)
+*/
+
+#version 460
+layout (local_size_x = 16, local_size_y = 16) in;
+
+layout (std430, set = 0, binding = 0) buffer SSBO_clusterActive {
+    uint clusterActiveBits[];
+};
+
+layout (set = 0, binding = 1) uniform sampler2D depthTex;
+
+layout (std140, set = 0, binding = 2) uniform UBO_clusterParams {
+    mat4 inverseProjection;
+    uvec4 tileSizes; // numTiles.xyz, tileSizeInPx.w (square tiles)
+    uvec2 screenDimensions;
+};
+
+layout (push_constant) uniform constants {
+    float zNear;
+    float zFar;
+} pc;
+
+uint getDepthSlice(float z, uint numSlices) {
+    float nz = max(z, 1e-6); // avoid log(0)
+    float l = log(pc.zFar / pc.zNear);
+    float t = (log(nz) - log(pc.zNear)) / l; // in [0,1]
+    return uint(clamp(floor(t * float(numSlices)), 0.0, float(numSlices - 1u)));
+}
+
+uint clusterIndex(uvec2 px, float depth) {
+    // XY
+    uint tileSizeInPx = tileSizes.w;
+    uvec2 clusterXY = px / tileSizeInPx;
+    uvec2 nXY = tileSizes.xy;
+
+    // Reconstruct view-space position using inverse projection.
+    // Vulkan depth is in [0,1]. Put a point on the view ray at this depth.
+    //vec4 clip = vec4(0.0, 0.0, depth * 2.0 - 1.0, 1.0); // NDC.z in [-1,1]
+    vec4 clip = vec4(0, 0, depth, 1); // NDC.z in [0,1]
+
+    vec4 viewPos4 = inverseProjection * clip;
+    vec3 viewPos = viewPos4.xyz / viewPos4.w;
+
+    float zDist = abs(viewPos.z);
+
+    uint zSlice = getDepthSlice(zDist, tileSizes.z);
+
+    return clusterXY.x + nXY.x * clusterXY.y + (nXY.x * nXY.y) * zSlice;
+}
+
+void markActive(uint idx) {
+    uint word = idx >> 5; // /32
+    uint bit = 1u << (idx & 31u);
+    atomicOr(clusterActiveBits[word], bit);
+}
+
+void main() {
+    uvec2 px = gl_GlobalInvocationID.xy;
+    if (px.x >= screenDimensions.x || px.y >= screenDimensions.y) return;
+
+    vec2 uv = (vec2(px) + 0.5) / vec2(screenDimensions);
+    float depth = texture(depthTex, uv).r;
+
+    // Skip sky (depth==0)
+    if (depth <= 0.0) return;
+
+    uint idx = clusterIndex(px, depth);
+    markActive(idx);
+}

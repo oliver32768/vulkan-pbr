@@ -279,7 +279,7 @@ struct ClusterBuilderPushConstantsIn {
 
 struct ClusterBuilderIn {
 	glm::mat4 invProj;
-	glm::uvec4 tileSizes; // stores tile size in pixel in screenspace in .w component
+	glm::uvec4 tileSizes; // stores tile size in pixel in screenspace in .w component | TODO: Just make it x,y,z,px
 	glm::uvec4 screenDimensions; // .yw for alignment padding
 };
 
@@ -298,18 +298,27 @@ struct ClusteredLightResources {
 	std::vector<uint32_t> indices;
 	LightParams lightParams{};
 
-	// --- Cluster builder ---
-	// CPU Side data
-	ClusterBuilderPushConstantsIn builderPC;
-	ClusterBuilderIn builderIn;
-	ClusterBuilderOut builderOut;
 	uint32_t numClusters;
-	glm::uvec3 tiles;
+
+	// --- Cluster builder ---
+	// Data
+	ClusterBuilderPushConstantsIn builderPC;
+	ClusterBuilderIn              builderIn;
+	ClusterBuilderOut             builderOut; // I allocate a fixed size array (depending on builderIn.tileSizes.xyz) of these at runtime in each frame
 	// Pipeline + Descriptor
 	VkDescriptorSetLayout builderSetLayout{};
-	VkPipelineLayout builderPipelineLayout{};
-	VkPipeline builderPipeline{};
-	VkDescriptorSet builderSet{};
+	VkPipelineLayout	  builderPipelineLayout{};
+	VkPipeline			  builderPipeline{};
+	VkDescriptorSet		  builderSet{};
+
+	// --- Determining Active Clusters ---
+	// Data
+	VkSampler depthSampler{};
+	// Pipeline + Descriptor
+	VkDescriptorSetLayout activeSetLayout{};
+	VkPipelineLayout	  activePipelineLayout{};
+	VkPipeline		      activePipeline{};
+	VkDescriptorSet		  activeSet{};
 	
 };
 
@@ -419,7 +428,11 @@ public:
 	void draw();
 	void run();
 
-	AllocatedBuffer build_cluster_grid();
+	void init_active_cluster_compute_pipeline();
+
+	AllocatedBuffer determine_active_clusters(VkCommandBuffer cmd);
+
+	AllocatedBuffer build_cluster_grid(VkCommandBuffer cmd);
 
 	void update_cluster_size(uint32_t tileSizePx, uint32_t numZSlices);
 
