@@ -58,9 +58,6 @@ layout(std430, set = 0, binding = 7) buffer ActiveClusterCountSSBO {
     uint activeClusterCount;
 };
 
-// Shared (per workgroup) scratch for light batching
-shared Light sharedLights[gl_WorkGroupSize.x];
-
 // Helpers
 bool testSphereAABB(in vec3 centerVS, in float radius, in uint clusterIndex) {
     VolumeTileAABB cell = cluster[clusterIndex];
@@ -87,49 +84,62 @@ vec3 lightCenterVS(in Light L) {
     return vec3(viewMatrix * vec4(L.pos_radius.xyz, 1.0));
 }
 
-// Main
+shared Light sharedLights[gl_WorkGroupSize.x];
+
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    if (gid >= activeClusterCount) return; // Just dispatch numClusters threads and let this take care of the excess ones
+    // replacing the early return because every workgroup must reach barrier() calls
+    // selectively masking off work below according to isActive instead
+    bool isActive = (gid < activeClusterCount); 
 
-    uint clusterIndex = activeClusterIndices[gid]; // Which cluster we are processing
+    uint clusterIndex = isActive ? activeClusterIndices[gid] : 0u; // Only read a valid cluster index if active
 
-    // Per-thread list of visible lights (cap to avoid runaway writes)
-    // You can raise this if you expect very dense lighting per cluster.
     const uint MAX_VISIBLE_PER_CLUSTER_PER_THREAD = 128u;
     uint visibleLightIndices[MAX_VISIBLE_PER_CLUSTER_PER_THREAD];
     uint visibleLightCount = 0u;
 
-    // Batch all lights through shared memory to reduce global reads
     uint threadCount = gl_WorkGroupSize.x;
     uint localID = gl_LocalInvocationIndex;
     uint numBatches = (lightCount + threadCount - 1u) / threadCount;
 
-    for (uint idx = 0u; idx < lightCount; ++idx) {
-        Light L = lights[idx];
+    for (uint batch = 0u; batch < numBatches; ++batch) {
+        uint lightIndex = batch * threadCount + localID;
 
-        float radius = L.pos_radius.w;
-        if (radius <= 0.0) continue;
+        if (lightIndex < lightCount) {
+            sharedLights[localID] = lights[lightIndex];
+        }
 
-        vec3 centerVS = lightCenterVS(L);
+        barrier(); // Make writes to shared memory visible
 
-        if (testSphereAABB(centerVS, radius, clusterIndex)) {
-            if (visibleLightCount < MAX_VISIBLE_PER_CLUSTER_PER_THREAD) {
-                visibleLightIndices[visibleLightCount] = idx;
-                visibleLightCount++;
+        if (isActive) {
+            for (uint li = 0u; li < threadCount; ++li) {
+                uint idx = batch * threadCount + li;
+                if (idx >= lightCount) break;
+
+                Light L = sharedLights[li];
+
+                float radius = L.pos_radius.w;
+                if (radius <= 0.0) continue;
+
+                vec3 centerVS = lightCenterVS(L);
+
+                if (testSphereAABB(centerVS, radius, clusterIndex)) {
+                    if (visibleLightCount < MAX_VISIBLE_PER_CLUSTER_PER_THREAD) {
+                        visibleLightIndices[visibleLightCount++] = idx;
+                    }
+                }
             }
         }
+
+        barrier(); // Nobody may start overwriting sharedLights for the next batch until all lanes are done reading this batch
     }
 
-    // Reserve space in the global index list (one atomic per cluster/thread)
-    uint offset = atomicAdd(globalIndexCount, visibleLightCount);
-
-    // Write this thread's results into the global list
-    for (uint i = 0u; i < visibleLightCount; ++i) {
-        globalLightIndexList[offset + i] = visibleLightIndices[i];
+    if (isActive) {
+        uint offset = atomicAdd(globalIndexCount, visibleLightCount);
+        for (uint i = 0u; i < visibleLightCount; ++i) {
+            globalLightIndexList[offset + i] = visibleLightIndices[i];
+        }
+        lightGrid[clusterIndex].offset = offset;
+        lightGrid[clusterIndex].count  = visibleLightCount;
     }
-
-    // Store per-cluster offset/count
-    lightGrid[clusterIndex].offset = offset;
-    lightGrid[clusterIndex].count = visibleLightCount;
 }
