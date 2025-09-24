@@ -1106,6 +1106,8 @@ void VulkanEngine::init() {
 
     init_compact_cluster_pipeline();
 
+    init_cluster_cull_compute_pipeline();
+
     init_pipelines();
 
     init_imgui();
@@ -1214,10 +1216,17 @@ void VulkanEngine::update_scene() {
     _shadowRes.dataPerCascade = cascadeData;    
     _shadowRes.orthoDims = orthoDims;
 
-    _lightRes.lightParams.lightCount = _lightRes.lights.size();
     _lightRes.builderIn.invProj = glm::inverse(sceneData.proj);
     _lightRes.builderIn.screenDimensions = glm::uvec4(_windowExtent.width, _windowExtent.height, 0, 0);
     update_cluster_size(120, 24);
+
+    _lightRes.cullParams.view = sceneData.view;
+    _lightRes.cullParams.lightCount = _lightRes.lights.size();
+
+    _lightRes.lightParams.lightCount = glm::uvec4(_lightRes.lights.size(), 0, 0, 0);
+    _lightRes.lightParams.gridDim = _lightRes.builderIn.tileSizes;
+    _lightRes.lightParams.screenDim = glm::uvec4(_windowExtent.width, _windowExtent.height, 0, 0);
+    _lightRes.lightParams.frustumPlanes = glm::vec4(nearPlane, farPlane, 0, 0);
 
     auto end = std::chrono::system_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -1306,7 +1315,6 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     AllocatedBuffer froxelAABBs = build_cluster_grid(cmd);
 
     // 2. Z pre-pass
-
     MaterialPipeline* lastPipeline = nullptr;
     MaterialInstance* lastMaterial = nullptr;
     VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
@@ -1367,6 +1375,16 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     CompactActiveClusters compactActiveClusters = compact_active_clusters(cmd, activeClusterBitset);
 
     // 5. Light binning (the actual clustering part)
+    size_t pointLightsSize = _lightRes.lights.size() * sizeof(PointLight); // Point light data
+    AllocatedBuffer pointLightBuffer = create_buffer(pointLightsSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    void* pointLightsPtr = pointLightBuffer.info.pMappedData;
+    std::memcpy(pointLightsPtr, _lightRes.lights.data(), pointLightsSize);
+
+    ClusterCullOutput clusterCullOutput = clustered_light_culling(cmd,
+        pointLightBuffer,
+        froxelAABBs,
+        compactActiveClusters
+    );
 
     // --- CSM Depth Pre-Pass ---
 
@@ -1485,21 +1503,16 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
         destroy_buffer(gpuCascadesBuffer);
     });
 
-    // Point light data
-    size_t pointLightsSize = _lightRes.lights.size() * sizeof(PointLight);
-    AllocatedBuffer pointLightBuffer = create_buffer(pointLightsSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    // TODO: Unsure if below will work, different from before
-    void* pointLightsPtr = pointLightBuffer.info.pMappedData; 
-    std::memcpy(pointLightsPtr, _lightRes.lights.data(), pointLightsSize);
     AllocatedBuffer lightParamBuffer = create_buffer(sizeof(LightParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
     auto* lightParamPtr = reinterpret_cast<LightParams*>(lightParamBuffer.allocation->GetMappedData());
     *lightParamPtr = _lightRes.lightParams;
-    // TODO: Alloc descriptor set on the fly here? It's what I did before
     _lightRes.set = _lightRes.descriptorAllocator.allocate(_device, _lightRes.setLayout);
     {
         DescriptorWriter writer;
         writer.write_buffer(0, pointLightBuffer.buffer, pointLightsSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-        writer.write_buffer(3, lightParamBuffer.buffer, sizeof(LightParams), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        writer.write_buffer(1, lightParamBuffer.buffer, sizeof(LightParams), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        writer.write_buffer(2, clusterCullOutput.LightGrid.buffer, _lightRes.numClusters * sizeof(LightGrid), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(3, clusterCullOutput.GlobalLightIndexList.buffer, 128 * _lightRes.numClusters * sizeof(uint32_t), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         writer.update_set(_device, _lightRes.set);
     }
     get_current_frame()._deletionQueue.push_function([=, this] {
@@ -1592,7 +1605,7 @@ void VulkanEngine::draw_background(VkCommandBuffer cmd) {
 void VulkanEngine::draw() {
     update_scene();
 
-    VK_CHECK(vkWaitForFences(_device, 1, &get_current_frame()._renderFence, true, 1000000000));
+    VK_CHECK(vkWaitForFences(_device, 1, &get_current_frame()._renderFence, true, UINT64_MAX));
 
     get_current_frame()._deletionQueue.flush();
     get_current_frame()._frameDescriptors.clear_pools(_device);
@@ -1793,7 +1806,7 @@ void VulkanEngine::run() {
         }
 
         // Keep the GPU-facing count in sync
-        _lightRes.lightParams.lightCount = static_cast<uint32_t>(_lightRes.lights.size());
+        _lightRes.lightParams.lightCount.x = static_cast<uint32_t>(_lightRes.lights.size());
 
         ImGui::End();
 
@@ -2051,6 +2064,202 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx) {
 
 // Clustered Shading
 
+ClusterCullOutput VulkanEngine::clustered_light_culling(VkCommandBuffer cmd, 
+    AllocatedBuffer pointLights,
+    AllocatedBuffer froxelAABBs,
+    CompactActiveClusters activeClusters
+) {
+    // Inputs:
+    size_t pointLightsSize = _lightRes.lights.size() * sizeof(PointLight);
+    size_t froxelAABBsSize = _lightRes.numClusters * sizeof(ClusterBuilderOut);
+    size_t activeClusterIndicesSize = _lightRes.numClusters * sizeof(uint32_t);
+    size_t clusterParamsSize = sizeof(ClusterCullParams);
+    AllocatedBuffer clusterParamsBuf = create_buffer(clusterParamsSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto* clusterParamsPtr = reinterpret_cast<ClusterCullParams*>(clusterParamsBuf.allocation->GetMappedData());
+    *clusterParamsPtr = _lightRes.cullParams;
+    size_t numActiveClustersSize = sizeof(uint32_t);
+
+    // Outputs:
+    size_t globalLightIndexListSize = 128 * _lightRes.numClusters * sizeof(uint32_t); // max of 128 lights per cluster
+    AllocatedBuffer globalLightIndexListBuf = create_buffer(globalLightIndexListSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+
+    size_t lightGridSize = _lightRes.numClusters * sizeof(LightGrid);
+    AllocatedBuffer lightGridBuf = create_buffer(lightGridSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+    vkCmdFillBuffer(cmd, lightGridBuf.buffer, 0, lightGridSize, 0u);
+
+    size_t globalIndexCountSize = sizeof(uint32_t);
+    AllocatedBuffer globalIndexCountBuf = create_buffer(globalIndexCountSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+    vkCmdFillBuffer(cmd, globalIndexCountBuf.buffer, 0, sizeof(uint32_t), 0u);
+
+    _lightRes.cullSet = _lightRes.descriptorAllocator.allocate(_device, _lightRes.cullSetLayout);
+    {
+        DescriptorWriter writer;
+        writer.write_buffer(0, pointLights.buffer, pointLightsSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(1, froxelAABBs.buffer, froxelAABBsSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(2, activeClusters.ActiveClusterList.buffer, activeClusterIndicesSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(3, globalLightIndexListBuf.buffer, globalLightIndexListSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(4, lightGridBuf.buffer, lightGridSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(5, globalIndexCountBuf.buffer, globalIndexCountSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(6, clusterParamsBuf.buffer, clusterParamsSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(7, activeClusters.ActiveClusterCount.buffer, numActiveClustersSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.update_set(_device, _lightRes.cullSet);
+    }
+    get_current_frame()._deletionQueue.push_function([=, this] {
+        destroy_buffer(clusterParamsBuf);
+        destroy_buffer(globalLightIndexListBuf);
+        destroy_buffer(lightGridBuf);
+        destroy_buffer(globalIndexCountBuf);
+    });
+
+    {
+        VkBufferMemoryBarrier2 barriers[5] = {
+            { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 },
+            { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 },
+            { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 },
+            { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 },
+            { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 }
+        };
+
+        // Froxel AABBs were produced by a compute shader in the same command buffer
+        barriers[0].buffer = froxelAABBs.buffer;
+        barriers[0].srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barriers[0].srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        barriers[0].dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barriers[0].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        barriers[0].offset = 0;
+        barriers[0].size = VK_WHOLE_SIZE;
+
+        // Active cluster list / count were produced by a compute shader in the same command buffer
+        barriers[1].buffer = activeClusters.ActiveClusterList.buffer;
+        barriers[1].srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barriers[1].srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        barriers[1].dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barriers[1].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        barriers[1].offset = 0;
+        barriers[1].size = VK_WHOLE_SIZE;
+
+        barriers[2].buffer = activeClusters.ActiveClusterCount.buffer;
+        barriers[2].srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barriers[2].srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        barriers[2].dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barriers[2].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        barriers[2].offset = 0;
+        barriers[2].size = VK_WHOLE_SIZE;
+
+        barriers[3].buffer = globalIndexCountBuf.buffer;
+        barriers[3].srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        barriers[3].srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        barriers[3].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barriers[3].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        barriers[3].offset = 0;
+        barriers[3].size = VK_WHOLE_SIZE;
+
+        barriers[4].buffer = lightGridBuf.buffer;
+        barriers[4].srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        barriers[4].srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        barriers[4].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barriers[4].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        barriers[4].offset = 0;
+        barriers[4].size = VK_WHOLE_SIZE;
+
+        VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        dep.bufferMemoryBarrierCount = 5;
+        dep.pBufferMemoryBarriers = barriers;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    }
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _lightRes.cullPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _lightRes.cullPipelineLayout, 0, 1, &_lightRes.cullSet, 0, nullptr);
+
+    const uint32_t LOCAL_SIZE_X = 64;
+    uint32_t maxClusters = _lightRes.numClusters; // = gridDim.x * gridDim.y * gridDim.z
+    uint32_t groupsX = (maxClusters + LOCAL_SIZE_X - 1) / LOCAL_SIZE_X;
+
+    vkCmdDispatch(cmd, groupsX, 1, 1);
+
+    ClusterCullOutput ret{};
+    ret.GlobalLightIndexList = globalLightIndexListBuf;
+    ret.LightGrid = lightGridBuf;
+    ret.GlobalIndexCount = globalIndexCountBuf;
+
+    {
+        VkBufferMemoryBarrier2 barriers[3] = {
+            { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 },
+            { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 },
+            { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 }
+        };
+
+        // Light grid produced by culling compute shader needs to have writes visible
+        barriers[0].buffer = ret.LightGrid.buffer;
+        barriers[0].srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barriers[0].srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        barriers[0].dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        barriers[0].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        barriers[0].offset = 0;
+        barriers[0].size = VK_WHOLE_SIZE;
+
+        // same deal with light index list
+        barriers[1].buffer = ret.GlobalLightIndexList.buffer;
+        barriers[1].srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barriers[1].srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        barriers[1].dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        barriers[1].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        barriers[1].offset = 0;
+        barriers[1].size = VK_WHOLE_SIZE;
+
+        barriers[2].buffer = ret.GlobalIndexCount.buffer;
+        barriers[2].srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barriers[2].srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        barriers[2].dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        barriers[2].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        barriers[2].offset = 0;
+        barriers[2].size = VK_WHOLE_SIZE;
+
+        VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        dep.bufferMemoryBarrierCount = 3;
+        dep.pBufferMemoryBarriers = barriers;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    }
+
+    return ret;
+}
+
+void VulkanEngine::init_cluster_cull_compute_pipeline() {
+    DescriptorLayoutBuilder b;
+    b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // Input: point lights
+    b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // Input: froxel AABBs
+    b.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // Input: Unique active cluster indices
+    b.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // Output: global light index list
+    b.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // Output: per cluster offset/count
+    b.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // Output: length of global light index list
+    b.add_binding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // Input: params (light count, view space transform)
+    b.add_binding(7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // Input: Unique active cluster count
+    _lightRes.cullSetLayout = b.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
+
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &_lightRes.cullSetLayout;
+    plci.pushConstantRangeCount = 0;
+    plci.pPushConstantRanges = nullptr;
+    VK_CHECK(vkCreatePipelineLayout(_device, &plci, nullptr, &_lightRes.cullPipelineLayout));
+
+    // shader & pipeline
+    VkShaderModule cs;
+    if (!(vkutil::load_shader_module("../../shaders/cluster_cull.comp.spv", _device, &cs))) {
+        fmt::print("Error when building the cluster culling compute shader \n");
+    }
+    VkComputePipelineCreateInfo cpci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+    cpci.layout = _lightRes.cullPipelineLayout;
+    cpci.stage = VkPipelineShaderStageCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = cs,
+        .pName = "main"
+    };
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &_lightRes.cullPipeline));
+    vkDestroyShaderModule(_device, cs, nullptr);
+}
+
 CompactActiveClusters VulkanEngine::compact_active_clusters(VkCommandBuffer cmd, AllocatedBuffer activeClusterBitfield) {
     size_t activeClusterBitfieldSize = ((_lightRes.numClusters + 31u) / 32u) * sizeof(uint32_t);
     
@@ -2094,9 +2303,9 @@ CompactActiveClusters VulkanEngine::compact_active_clusters(VkCommandBuffer cmd,
         // Bitfield produced by previous compute pass
         barriers[0].buffer = activeClusterBitfield.buffer;
         barriers[0].srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-        barriers[0].srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+        barriers[0].srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
         barriers[0].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-        barriers[0].dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+        barriers[0].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
         barriers[0].offset = 0;
         barriers[0].size = VK_WHOLE_SIZE;
 
@@ -2105,7 +2314,7 @@ CompactActiveClusters VulkanEngine::compact_active_clusters(VkCommandBuffer cmd,
         barriers[1].srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
         barriers[1].srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
         barriers[1].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-        barriers[1].dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+        barriers[1].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
         barriers[1].offset = 0;
         barriers[1].size = VK_WHOLE_SIZE;
 
@@ -2375,10 +2584,10 @@ void VulkanEngine::init_cluster_building_compute_pipeline() {
 
 void VulkanEngine::init_point_light_descriptor_set() {
     DescriptorLayoutBuilder b;
-    b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // lights
-    b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // offsets
-    b.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // indices
-    b.add_binding(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER); // params
+    b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); 
+    b.add_binding(1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER); 
+    b.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    b.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); 
     _lightRes.setLayout = b.build(_device, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT);
 
     DescriptorAllocatorGrowable::PoolSizeRatio sizes[] = {

@@ -267,9 +267,10 @@ struct PointLight {
 };
 
 struct LightParams {
-	uint32_t lightCount;
-	glm::uvec3 gridDim;
-	uint32_t useClusters;
+	glm::uvec4 lightCount;
+	glm::uvec4 gridDim;
+	glm::uvec4 screenDim;
+	glm::vec4 frustumPlanes;
 };
 
 struct ClusterBuilderPushConstantsIn {
@@ -291,6 +292,27 @@ struct ClusterBuilderOut {
 struct CompactActiveClusters {
 	AllocatedBuffer ActiveClusterList;
 	AllocatedBuffer ActiveClusterCount;
+};
+
+struct LightGrid {
+	uint32_t offset;
+	uint32_t count;
+};
+
+static_assert(sizeof(LightGrid) == 8);
+
+struct ClusterCullParams {
+	glm::mat4 view;
+	uint32_t lightCount;
+	glm::uvec3 _pad;
+};
+
+static_assert(sizeof(ClusterCullParams) == 80);
+
+struct ClusterCullOutput {
+	AllocatedBuffer GlobalLightIndexList;
+	AllocatedBuffer LightGrid;
+	AllocatedBuffer GlobalIndexCount;
 };
 
 struct ClusteredLightResources {
@@ -331,6 +353,15 @@ struct ClusteredLightResources {
 	VkPipelineLayout	  compactPipelineLayout{};
 	VkPipeline		      compactPipeline{};
 	VkDescriptorSet		  compactSet{};
+
+	// --- Culling ---
+	// Data
+	ClusterCullParams cullParams;
+	// Pipeline + Descriptor
+	VkDescriptorSetLayout cullSetLayout{};
+	VkPipelineLayout	  cullPipelineLayout{};
+	VkPipeline		      cullPipeline{};
+	VkDescriptorSet		  cullSet{};
 	
 };
 
@@ -360,7 +391,7 @@ public:
 	bool _isInitialized{ false };
 	int _frameNumber{ 0 };
 	bool stop_rendering{ false };
-	VkExtent2D _windowExtent{ 1600 , 900 };
+	VkExtent2D _windowExtent{ 1920 , 1080 };
 	struct SDL_Window* _window{ nullptr }; // forward declaration
 
 	VkInstance _instance;
@@ -439,6 +470,10 @@ public:
 	
 	void draw();
 	void run();
+
+	ClusterCullOutput clustered_light_culling(VkCommandBuffer cmd, AllocatedBuffer pointLights, AllocatedBuffer froxelAABBs, CompactActiveClusters activeClusters);
+
+	void init_cluster_cull_compute_pipeline();
 
 	CompactActiveClusters compact_active_clusters(VkCommandBuffer cmd, AllocatedBuffer activeClusterBitfield);
 

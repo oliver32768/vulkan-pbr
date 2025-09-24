@@ -190,6 +190,26 @@ vec3 shadePointLight(Light light, vec3 P, vec3 N, vec3 V, float NoV, vec3 baseCo
     return (Fd + Fr) * Li * NoL * attenuation;
 }
 
+uint getDepthSlice(float z, uint numSlices, float zNear, float zFar) {
+    float nz = max(z, 1e-6); // avoid log(0)
+    float l = log(zFar / zNear);
+    float t = (log(nz) - log(zNear)) / l; // in [0,1]
+    return uint(clamp(floor(t * float(numSlices)), 0.0, float(numSlices - 1u)));
+}
+
+uint clusterIndexFromWorldPos(vec3 worldPos, float zNear, float zFar) {
+    int x = int(gl_FragCoord.x);
+    int y = int(gl_FragCoord.y);
+    uint tileX = uint(clamp(x / int(u.gridDim.w), 0, int(u.gridDim.x) - 1));
+    uint tileY = uint(clamp(y / int(u.gridDim.w), 0, int(u.gridDim.y) - 1));
+
+    // View-space Z (choose the right source)
+    vec3 viewPos = vec3(sceneData.view * vec4(worldPos, 1.0));
+    uint z = getDepthSlice(abs(viewPos.z), u.gridDim.z, zNear, zFar);
+
+    return (z * u.gridDim.y + tileY) * u.gridDim.x + tileX;
+}
+
 void main() {
     vec3 camPos = inverse(sceneData.view)[3].xyz;
 
@@ -266,14 +286,23 @@ void main() {
     vec3 ambient = (kD_ibl * diffuse + specular) * ao; 
 
     // --- Shadow Mapping ---
-    float shadow = ShadowCalculation(vWorldPos, normalize(vWorldNormal), L); // use geometric normal?
+    float shadow = ShadowCalculation(vWorldPos, normalize(vWorldNormal), L); // use geometric normal 
     vec3 color = emissive + ambient + ((1.0 - shadow) * direct);
 
     // --- Point lights ---
-    for (uint li = 0u; li < u.lightCount; ++li) {
-        Light Lgt = lights[li];
-        color += shadePointLight(Lgt, vWorldPos, N, V, NoV, baseColor, F0, alpha, metallic);
+    uint clusterIndex = clusterIndexFromWorldPos(vWorldPos, u.frustumPlanes.x, u.frustumPlanes.y);
+
+    LightGrid lg = lightGrid[clusterIndex];
+    uint base = lg.offset;
+    uint count = lg.count;
+
+    for (uint i = 0u; i < count; ++i) {
+        uint li = globalLightIndexList[base + i];
+        Light L = lights[li];
+        color += shadePointLight(L, vWorldPos, N, V, NoV, baseColor, F0, alpha, metallic);
     }
 
     outFragColor = vec4(color, alphaOut);
+    //outFragColor = vec4(vec3(count / 128.0), alphaOut);
+    //outFragColor = vec4(vec3(clusterIndex / (16.0 * 9.0 * 24.0)), alphaOut);
 }

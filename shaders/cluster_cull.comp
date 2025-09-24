@@ -1,0 +1,137 @@
+#version 460
+layout(local_size_x = 64) in; 
+
+struct Light {
+    vec4 pos_radius; // xyz = position (world), w = radius
+    vec4 color_intensity; // rgb = color, w = intensity
+};
+
+struct LightGrid {
+    uint offset; // start into globalLightIndexList
+    uint count; // number of lights intersecting this cluster
+};
+
+struct VolumeTileAABB {
+    vec4 minPoint; // xyz = min (view space)
+    vec4 maxPoint; // xyz = max (view space)
+};
+
+// All point lights
+layout(std430, set = 0, binding = 0) readonly buffer LightsBuf {
+    Light lights[];
+};
+
+// Cluster AABBs
+layout(std430, set = 0, binding = 1) readonly buffer ClusterAABB {
+    VolumeTileAABB cluster[];
+};
+
+// Unique cluster indices
+layout(std430, set = 0, binding = 2) readonly buffer ActiveClusters {
+    uint activeClusterIndices[];
+};
+
+// Output: flat list of all intersecting light indices for *all* processed clusters
+layout(std430, set = 0, binding = 3) buffer LightIndexSSBO {
+    uint globalLightIndexList[];
+};
+
+// Output: per cluster offset/count into globalLightIndexList
+layout(std430, set = 0, binding = 4) buffer LightGridSSBO {
+    LightGrid lightGrid[];
+};
+
+// Output: global running count for globalLightIndexList (atomically incremented)
+layout(std430, set = 0, binding = 5) buffer GlobalIndexCountSSBO {
+    uint globalIndexCount;
+};
+
+// Small params block (SSBO, not uniform)
+layout(std430, set = 0, binding = 6) readonly buffer ParamsBuf {
+    mat4 viewMatrix;
+    uint lightCount;
+    uvec3 _pad;
+};
+
+// Input
+layout(std430, set = 0, binding = 7) buffer ActiveClusterCountSSBO {
+    uint activeClusterCount;
+};
+
+// Shared (per workgroup) scratch for light batching
+shared Light sharedLights[gl_WorkGroupSize.x];
+
+// Helpers
+bool testSphereAABB(in vec3 centerVS, in float radius, in uint clusterIndex) {
+    VolumeTileAABB cell = cluster[clusterIndex];
+
+    float sqDist = 0.0;
+    // Clamp point to AABB and accumulate squared distance outside box
+    for (int i = 0; i < 3; ++i) {
+        float v = centerVS[i];
+        float minv = cell.minPoint[i];
+        float maxv = cell.maxPoint[i];
+        if (v < minv) {
+            float d = (minv - v);
+            sqDist += d * d;
+        } else if (v > maxv) {
+            float d = (v - maxv);
+            sqDist += d * d;
+        }
+    }
+    return sqDist <= (radius * radius);
+}
+
+// Transform to view space if needed
+vec3 lightCenterVS(in Light L) {
+    return vec3(viewMatrix * vec4(L.pos_radius.xyz, 1.0));
+}
+
+// Main
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= activeClusterCount) return; // Just dispatch numClusters threads and let this take care of the excess ones
+
+    uint clusterIndex = activeClusterIndices[gid]; // Which cluster we are processing
+
+    // Per-thread list of visible lights (cap to avoid runaway writes)
+    // You can raise this if you expect very dense lighting per cluster.
+    const uint MAX_VISIBLE_PER_CLUSTER_PER_THREAD = 128u;
+    uint visibleLightIndices[MAX_VISIBLE_PER_CLUSTER_PER_THREAD];
+    uint visibleLightCount = 0u;
+
+    // Batch all lights through shared memory to reduce global reads
+    uint threadCount = gl_WorkGroupSize.x;
+    uint localID = gl_LocalInvocationIndex;
+    uint numBatches = (lightCount + threadCount - 1u) / threadCount;
+
+    for (uint idx = 0u; idx < lightCount; ++idx) {
+        Light L = lights[idx];
+
+        float radius = L.pos_radius.w;
+        if (radius <= 0.0) continue;
+
+        vec3 centerVS = lightCenterVS(L);
+
+        if (testSphereAABB(centerVS, radius, clusterIndex)) {
+            if (visibleLightCount < MAX_VISIBLE_PER_CLUSTER_PER_THREAD) {
+                visibleLightIndices[visibleLightCount] = idx;
+                visibleLightCount++;
+            }
+        }
+    }
+
+    //visibleLightCount = 128;
+
+    // Reserve space in the global index list (one atomic per cluster/thread)
+    uint offset = atomicAdd(globalIndexCount, visibleLightCount);
+
+    // Write this thread's results into the global list
+    for (uint i = 0u; i < visibleLightCount; ++i) {
+        globalLightIndexList[offset + i] = visibleLightIndices[i];
+    }
+
+    // Store per-cluster offset/count
+    lightGrid[clusterIndex].offset = offset;
+    lightGrid[clusterIndex].count = visibleLightCount;
+}
