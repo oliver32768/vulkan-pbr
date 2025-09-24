@@ -46,8 +46,7 @@ void main() {
     // Early out if no bits set
     if (bits == 0u) return;
 
-    // Iterate set bits efficiently: clear the least-significant set bit each step
-    // GLSL has findLSB() and bitCount() in 4.30+; we use findLSB for exact index.
+    // clear the least-significant set bit each step
     while (bits != 0u) {
         uint lsbIndex = findLSB(bits); // 0..31
         uint clusterIndex = (wordIndex << 5) + lsbIndex; // word*32 + bit

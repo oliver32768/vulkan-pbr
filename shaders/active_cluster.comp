@@ -45,18 +45,9 @@ uint clusterIndex(uvec2 px, float depth) {
     uvec2 clusterXY = px / tileSizeInPx;
     uvec2 nXY = tileSizes.xy;
 
-    // Reconstruct view-space position using inverse projection.
-    // Vulkan depth is in [0,1]. Put a point on the view ray at this depth.
-    //vec4 clip = vec4(0.0, 0.0, depth * 2.0 - 1.0, 1.0); // NDC.z in [-1,1]
-    //vec4 clip = vec4(0, 0, depth, 1); // NDC.z in [0,1]
-
-    //vec4 viewPos4 = inverseProjection * clip;
-    //vec3 viewPos = viewPos4.xyz / viewPos4.w;
-    //float zDist = abs(viewPos.z);
-
     vec2 ndc;
     ndc.x = ( (float(px.x) + 0.5) / float(screenDimensions.x) ) * 2.0 - 1.0;
-    ndc.y = 1.0 - ( (float(px.y) + 0.5) / float(screenDimensions.y) ) * 2.0; // flip Y
+    ndc.y = ( (float(px.y) + 0.5) / float(screenDimensions.y) ) * 2.0; // flip Y
     float ndcZ = depth; // Vulkan depth in [0,1]
     vec4 clip  = vec4(ndc, ndcZ, 1.0);
     vec4 view4 = inverseProjection * clip;
