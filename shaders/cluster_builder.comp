@@ -39,7 +39,7 @@ vec4 screenToView(vec4 screen) {
     // screen.xy is in pixels (origin at top-left in Vulkan)
     vec2 ndc;
     ndc.x = (screen.x / float(screenDimensions.x)) * 2.0 - 1.0;
-    ndc.y = 1.0 - (screen.y / float(screenDimensions.y)) * 2.0; // flip Y for Vulkan
+    ndc.y = (screen.y / float(screenDimensions.y)) * 2.0 - 1.0; // flip Y for Vulkan
 
     float ndcZ = screen.z; // expect caller to pass 0.0 for near in Vulkan
     vec4 clip = vec4(ndc, ndcZ, screen.w);
@@ -49,7 +49,7 @@ vec4 screenToView(vec4 screen) {
 void main() {
     const vec3 eyePos = vec3(0.0); // view space
 
-    uint tileSizePx = tileSizes[3];
+    uint tileSizePx = tileSizes.w;
     uint tileIndex = gl_WorkGroupID.x +
                      gl_WorkGroupID.y * gl_NumWorkGroups.x +
                      gl_WorkGroupID.z * (gl_NumWorkGroups.x * gl_NumWorkGroups.y);

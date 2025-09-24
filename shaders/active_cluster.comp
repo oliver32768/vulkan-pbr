@@ -31,11 +31,12 @@ layout (push_constant) uniform constants {
     float zFar;
 } pc;
 
-uint getDepthSlice(float z, uint numSlices) {
-    float nz = max(z, 1e-6); // avoid log(0)
-    float l = log(pc.zFar / pc.zNear);
-    float t = (log(nz) - log(pc.zNear)) / l; // in [0,1]
-    return uint(clamp(floor(t * float(numSlices)), 0.0, float(numSlices - 1u)));
+uint getDepthSlice(float zAbs, uint numSlices, float zNear, float zFar) {
+    float nz = max(zAbs, 1e-6);
+    float l  = log(zFar / zNear);
+    float t  = (log(nz) - log(zNear)) / l;   // [0,1]
+    uint s   = uint(floor(t * float(numSlices)));
+    return clamp(s, 0u, numSlices - 1u);
 }
 
 uint clusterIndex(uvec2 px, float depth) {
@@ -47,14 +48,21 @@ uint clusterIndex(uvec2 px, float depth) {
     // Reconstruct view-space position using inverse projection.
     // Vulkan depth is in [0,1]. Put a point on the view ray at this depth.
     //vec4 clip = vec4(0.0, 0.0, depth * 2.0 - 1.0, 1.0); // NDC.z in [-1,1]
-    vec4 clip = vec4(0, 0, depth, 1); // NDC.z in [0,1]
+    //vec4 clip = vec4(0, 0, depth, 1); // NDC.z in [0,1]
 
-    vec4 viewPos4 = inverseProjection * clip;
-    vec3 viewPos = viewPos4.xyz / viewPos4.w;
+    //vec4 viewPos4 = inverseProjection * clip;
+    //vec3 viewPos = viewPos4.xyz / viewPos4.w;
+    //float zDist = abs(viewPos.z);
 
-    float zDist = abs(viewPos.z);
-
-    uint zSlice = getDepthSlice(zDist, tileSizes.z);
+    vec2 ndc;
+    ndc.x = ( (float(px.x) + 0.5) / float(screenDimensions.x) ) * 2.0 - 1.0;
+    ndc.y = 1.0 - ( (float(px.y) + 0.5) / float(screenDimensions.y) ) * 2.0; // flip Y
+    float ndcZ = depth; // Vulkan depth in [0,1]
+    vec4 clip  = vec4(ndc, ndcZ, 1.0);
+    vec4 view4 = inverseProjection * clip;
+    vec3 view  = view4.xyz / view4.w;
+    float zDist = abs(view.z);
+    uint zSlice = getDepthSlice(zDist, tileSizes.z, pc.zNear, pc.zFar);
 
     return clusterXY.x + nXY.x * clusterXY.y + (nXY.x * nXY.y) * zSlice;
 }

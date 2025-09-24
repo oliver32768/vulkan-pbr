@@ -121,8 +121,6 @@ void main() {
         }
     }
 
-    //visibleLightCount = 128;
-
     // Reserve space in the global index list (one atomic per cluster/thread)
     uint offset = atomicAdd(globalIndexCount, visibleLightCount);
 
