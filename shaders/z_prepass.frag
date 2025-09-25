@@ -18,7 +18,7 @@ layout(set = 1, binding = 0) uniform sampler2D colorTex;
 
 void main() {             
     vec4 baseSample = texture(colorTex, vUV);
-    if (baseSample.w < 0.01) {
+    if (baseSample.w < 0.25) {
         discard;
     }
 }  

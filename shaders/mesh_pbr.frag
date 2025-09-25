@@ -217,7 +217,7 @@ void main() {
 
     vec4 baseSample = texture(colorTex, vUV);
 
-    if (baseSample.w == 0.0) {
+    if (baseSample.w < 0.25) {
         discard;
     }
 

@@ -42,6 +42,127 @@ void LoadedGLTF::clearAll() {
     creator->destroy_buffer(materialDataBuffer);
 }
 
+inline bool is_srgb(VkFormat f) {
+    return f == VK_FORMAT_R8G8B8A8_SRGB;
+}
+
+inline bool should_premultiply(ImageUse use) {
+    return (uint32_t(use) & ImageUse::BaseColor) != 0;
+}
+
+// sRGB <-> linear helpers
+struct SRGBLUT {
+    float  s2l[256];
+    uint8_t l2s[4097]; // 0..1 mapped to 0..4096 for table index
+    SRGBLUT() {
+        for (int i = 0;i < 256;++i) {
+            float c = i / 255.f;
+            s2l[i] = (c <= 0.04045f) ? (c / 12.92f) : std::pow((c + 0.055f) / 1.055f, 2.4f);
+        }
+        for (int i = 0;i <= 4096;++i) {
+            float c = i / 4096.f;
+            float s = (c <= 0.0031308f) ? (12.92f * c) : (1.055f * std::pow(c, 1.f / 2.4f) - 0.055f);
+            l2s[i] = (uint8_t)std::round(std::clamp(s, 0.f, 1.f) * 255.f);
+        }
+    }
+};
+inline const SRGBLUT& srgb_lut() { static SRGBLUT L; return L; }
+
+inline uint8_t lin_to_srgb_8(float lin) {
+    const auto& L = srgb_lut();
+    int idx = (int)std::round(std::clamp(lin, 0.f, 1.f) * 4096.f);
+    return L.l2s[idx];
+}
+
+inline float srgb_to_lin_8(uint8_t s) {
+    return srgb_lut().s2l[s];
+}
+
+void premultiply_rgba_inplace(uint8_t* data, int w, int h, bool storageIsSRGB) {
+    const size_t n = size_t(w) * size_t(h);
+    if (storageIsSRGB) { // Convert RGB sRGB->linear, multiply by alpha, convert back to sRGB
+        for (size_t i = 0;i < n;++i) {
+            uint8_t* px = data + i * 4;
+            float a = px[3] / 255.f;
+            float r = srgb_to_lin_8(px[0]) * a;
+            float g = srgb_to_lin_8(px[1]) * a;
+            float b = srgb_to_lin_8(px[2]) * a;
+            px[0] = lin_to_srgb_8(r);
+            px[1] = lin_to_srgb_8(g);
+            px[2] = lin_to_srgb_8(b);
+            px[3] = px[3]; // alpha stays linear as 8-bit UNORM:
+        }
+    }
+    else { // Linear UNORM storage; just scale RGB by alpha
+        for (size_t i = 0;i < n;++i) {
+            uint8_t* px = data + i * 4;
+            float a = px[3] / 255.f;
+            px[0] = (uint8_t)std::round(px[0] * a);
+            px[1] = (uint8_t)std::round(px[1] * a);
+            px[2] = (uint8_t)std::round(px[2] * a);
+            // alpha unchanged
+        }
+    }
+}
+
+std::optional<AllocatedImage> load_image(
+    VulkanEngine* engine,
+    VkFormat format,
+    ImageUse use,
+    fastgltf::Asset& asset,
+    fastgltf::Image& image,
+    const std::filesystem::path& base_dir)
+{
+    AllocatedImage newImage{};
+    int width = 0, height = 0, nrChannels = 0;
+
+    auto upload = [&](unsigned char* data) {
+        if (!data) { fmt::println("stbi_load failed"); return; }
+
+        if (should_premultiply(use)) {
+            premultiply_rgba_inplace(data, width, height, is_srgb(format));
+        }
+
+        VkExtent3D imagesize{ (uint32_t)width, (uint32_t)height, 1 };
+        newImage = engine->create_image(data, imagesize, format, VK_IMAGE_USAGE_SAMPLED_BIT, true);
+        stbi_image_free(data);
+    };
+
+    std::visit(
+        fastgltf::visitor{
+            [](auto&) {},
+            [&](fastgltf::sources::URI& filePath) {
+                assert(filePath.fileByteOffset == 0);
+                assert(filePath.uri.isLocalPath());
+                const std::string path(filePath.uri.path().begin(), filePath.uri.path().end());
+                unsigned char* data = stbi_load(path.c_str(), &width, &height, &nrChannels, 4);
+                upload(data);
+            },
+            [&](fastgltf::sources::Vector& vector) {
+                unsigned char* data = stbi_load_from_memory(vector.bytes.data(),
+                                                            (int)vector.bytes.size(),
+                                                            &width,&height,&nrChannels,4);
+                upload(data);
+            },
+            [&](fastgltf::sources::BufferView& view) {
+                auto& bufferView = asset.bufferViews[view.bufferViewIndex];
+                auto& buffer = asset.buffers[bufferView.bufferIndex];
+                std::visit(fastgltf::visitor{
+                    [](auto&) {},
+                    [&](fastgltf::sources::Vector& vector) {
+                        unsigned char* data = stbi_load_from_memory(vector.bytes.data() + bufferView.byteOffset,
+                                                                    (int)bufferView.byteLength,
+                                                                    &width,&height,&nrChannels,4);
+                        upload(data);
+                    }
+                }, buffer.data);
+            }
+        }, image.data);
+
+    if (newImage.image == VK_NULL_HANDLE) return {};
+    return newImage;
+}
+
 std::optional<AllocatedImage> load_image(VulkanEngine* engine, VkFormat format, fastgltf::Asset& asset, fastgltf::Image& image, const std::filesystem::path& base_dir) {
     AllocatedImage newImage{};
 
@@ -285,7 +406,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
     for (size_t img_idx = 0; img_idx < gltf.images.size(); ++img_idx) {
         fastgltf::Image& image = gltf.images[img_idx];
         VkFormat fmt = chooseFormat(usage[img_idx]);
-        std::optional<AllocatedImage> img = load_image(engine, fmt, gltf, image, base_dir); // add param
+        std::optional<AllocatedImage> img = load_image(engine, fmt, usage[img_idx], gltf, image, base_dir); // add param
 
         if (img.has_value()) {
             images.push_back(*img);
