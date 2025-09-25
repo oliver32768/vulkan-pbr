@@ -319,6 +319,11 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
         constants.metal_rough_factors.x = mat.pbrData.metallicFactor;
         constants.metal_rough_factors.y = mat.pbrData.roughnessFactor;
+
+        constants.emissiveFactors.x = mat.emissiveFactor[0];
+        constants.emissiveFactors.y = mat.emissiveFactor[1];
+        constants.emissiveFactors.z = mat.emissiveFactor[2];
+
         // write material parameters to buffer
         sceneMaterialConstants[mat_idx] = constants;
 
@@ -339,7 +344,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         materialResources.normalSampler = engine->_defaultSamplerLinear;
         materialResources.occlusionImage = engine->_whiteImage;
         materialResources.occlusionSampler = engine->_defaultSamplerLinear;
-        materialResources.emissiveImage = engine->_blackImage;
+        materialResources.emissiveImage = engine->_whiteImage;
         materialResources.emissiveSampler = engine->_defaultSamplerLinear;
 
         // set the uniform buffer for the material data

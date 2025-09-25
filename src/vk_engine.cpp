@@ -391,11 +391,11 @@ void VulkanEngine::init_default_data() {
     materialResources.colorSampler = _defaultSamplerLinear;
     materialResources.metalRoughImage = _whiteImage;
     materialResources.metalRoughSampler = _defaultSamplerLinear;
-    materialResources.normalImage = _whiteImage;
+    materialResources.normalImage = _whiteImage; // This is wrong it should be (0.5, 0.5, 1.0)
     materialResources.normalSampler = _defaultSamplerLinear;
     materialResources.occlusionImage = _whiteImage;
     materialResources.occlusionSampler = _defaultSamplerLinear;
-    materialResources.emissiveImage = _blackImage;
+    materialResources.emissiveImage = _whiteImage;
     materialResources.emissiveSampler = _defaultSamplerLinear;
 
     // ubo
@@ -403,8 +403,9 @@ void VulkanEngine::init_default_data() {
 
     // write
     GLTFMetallic_Roughness::MaterialConstants* sceneUniformData = (GLTFMetallic_Roughness::MaterialConstants*)materialConstants.allocation->GetMappedData();
-    sceneUniformData->colorFactors = glm::vec4{ 1,1,1,1 };
+    sceneUniformData->colorFactors = glm::vec4{ 1, 1, 1, 1 };
     sceneUniformData->metal_rough_factors = glm::vec4{ 1, 0.5, 0, 0 };
+    sceneUniformData->emissiveFactors = glm::vec4{ 0, 0, 0, 0 };
 
     _mainDeletionQueue.push_function([=, this]() {
         destroy_buffer(materialConstants);

@@ -27,9 +27,10 @@ struct GLTFMetallic_Roughness {
 	struct MaterialConstants {
 		glm::vec4 colorFactors;
 		glm::vec4 metal_rough_factors;
+		glm::vec4 emissiveFactors;
 		// "In vulkan, when you want to bind a uniform buffer, it needs to meet a minimum requirement for its alignment. 
 		// 256 bytes is a good default alignment for this which all the gpus we target meet, so we are adding those vec4s to pad the structure to 256 bytes."
-		glm::vec4 extra[14]; 
+		glm::vec4 extra[13]; 
 	};
 
 	// will be written/bound to descriptor

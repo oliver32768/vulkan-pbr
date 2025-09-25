@@ -217,7 +217,7 @@ void main() {
 
     vec4 baseSample = texture(colorTex, vUV);
 
-    if (baseSample.w < 0.01) {
+    if (baseSample.w == 0.0) {
         discard;
     }
 
@@ -236,7 +236,7 @@ void main() {
 
     float ao = texture(AOTex, vUV).r;
 
-    vec3 emissive = texture(emissiveTex, vUV).rgb; 
+    vec3 emissive = materialData.emissiveFactors.xyz * texture(emissiveTex, vUV).rgb; 
 
     vec3 V = normalize(camPos - vWorldPos); // towards camera
     vec3 L = normalize(sceneData.sunlightDirection.xyz); 
@@ -307,4 +307,5 @@ void main() {
     outFragColor = vec4(color, alphaOut);
     //outFragColor = vec4(vec3(count / 128.0), alphaOut);
     //outFragColor = vec4(vec3(clusterIndex / (16.0 * 9.0 * 24.0)), alphaOut);
+    //outFragColor = vec4(materialData.emissiveFactors.xyz, alphaOut);
 }
