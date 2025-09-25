@@ -1217,9 +1217,14 @@ void VulkanEngine::update_scene() {
     _shadowRes.dataPerCascade = cascadeData;    
     _shadowRes.orthoDims = orthoDims;
 
+    _lightRes.builderIn.tileSizes.w = 120;
+    _lightRes.builderIn.tileSizes.x = (_windowExtent.width + _lightRes.builderIn.tileSizes.w - 1) / _lightRes.builderIn.tileSizes.w; // ceil(w / tile)
+    _lightRes.builderIn.tileSizes.y = (_windowExtent.height + _lightRes.builderIn.tileSizes.w - 1) / _lightRes.builderIn.tileSizes.w; // ceil(h / tile)
+    _lightRes.builderIn.tileSizes.z = 24;
+    _lightRes.numClusters = _lightRes.builderIn.tileSizes.x * _lightRes.builderIn.tileSizes.y * _lightRes.builderIn.tileSizes.z;
+
     _lightRes.builderIn.invProj = glm::inverse(sceneData.proj);
     _lightRes.builderIn.screenDimensions = glm::uvec4(_windowExtent.width, _windowExtent.height, 0, 0);
-    update_cluster_size(120, 24);
 
     _lightRes.cullParams.view = sceneData.view;
     _lightRes.cullParams.lightCount = _lightRes.lights.size();

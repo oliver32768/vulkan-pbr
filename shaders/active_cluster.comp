@@ -47,11 +47,11 @@ uint clusterIndex(uvec2 px, float depth) {
 
     vec2 ndc;
     ndc.x = ( (float(px.x) + 0.5) / float(screenDimensions.x) ) * 2.0 - 1.0;
-    ndc.y = ( (float(px.y) + 0.5) / float(screenDimensions.y) ) * 2.0; // flip Y
+    ndc.y = ( (float(px.y) + 0.5) / float(screenDimensions.y) ) * 2.0 - 1.0; 
     float ndcZ = depth; // Vulkan depth in [0,1]
-    vec4 clip  = vec4(ndc, ndcZ, 1.0);
+    vec4 clip = vec4(ndc, ndcZ, 1.0);
     vec4 view4 = inverseProjection * clip;
-    vec3 view  = view4.xyz / view4.w;
+    vec3 view = view4.xyz / view4.w;
     float zDist = abs(view.z);
     uint zSlice = getDepthSlice(zDist, tileSizes.z, pc.zNear, pc.zFar);
 
@@ -69,7 +69,8 @@ void main() {
     if (px.x >= screenDimensions.x || px.y >= screenDimensions.y) return;
 
     vec2 uv = (vec2(px) + 0.5) / vec2(screenDimensions);
-    float depth = texture(depthTex, uv).r;
+    //float depth = texture(depthTex, uv).r;
+    float depth = texelFetch(depthTex, ivec2(px), 0).r;
 
     // Skip sky (depth==0)
     if (depth <= 0.0) return;

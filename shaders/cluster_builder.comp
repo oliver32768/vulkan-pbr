@@ -39,7 +39,7 @@ vec4 screenToView(vec4 screen) {
     // screen.xy is in pixels (origin at top-left in Vulkan)
     vec2 ndc;
     ndc.x = (screen.x / float(screenDimensions.x)) * 2.0 - 1.0;
-    ndc.y = (screen.y / float(screenDimensions.y)) * 2.0 - 1.0; // flip Y for Vulkan
+    ndc.y = (screen.y / float(screenDimensions.y)) * 2.0 - 1.0; 
 
     float ndcZ = screen.z; // expect caller to pass 0.0 for near in Vulkan
     vec4 clip = vec4(ndc, ndcZ, screen.w);
@@ -55,9 +55,8 @@ void main() {
                      gl_WorkGroupID.z * (gl_NumWorkGroups.x * gl_NumWorkGroups.y);
 
     // screen space tile min/max
-    // z = -1, w = 1
     vec4 maxPoint_sS = vec4(vec2(gl_WorkGroupID.x + 1, gl_WorkGroupID.y + 1) * tileSizePx, 0.0, 1.0); // [0,1] NDC in Vulkan
-    vec4 minPoint_sS = vec4(gl_WorkGroupID.xy * tileSizePx, 0.0, 1.0); 
+    vec4 minPoint_sS = vec4(gl_WorkGroupID.xy * tileSizePx, 1.0, 1.0); 
     
     // to view
     vec3 maxPoint_vS = screenToView(maxPoint_sS).xyz;

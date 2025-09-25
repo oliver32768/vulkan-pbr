@@ -306,6 +306,6 @@ void main() {
 
     outFragColor = vec4(color, alphaOut);
     //outFragColor = vec4(vec3(count / 128.0), alphaOut);
-    //outFragColor = vec4(vec3(clusterIndex / (16.0 * 9.0 * 24.0)), alphaOut);
+    //outFragColor = vec4(vec3(clusterIndex / float(u.gridDim.x * u.gridDim.y * u.gridDim.z)), alphaOut);
     //outFragColor = vec4(materialData.emissiveFactors.xyz, alphaOut);
 }
