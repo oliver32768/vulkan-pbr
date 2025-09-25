@@ -322,8 +322,6 @@ struct ClusteredLightResources {
 	VkDescriptorSet set{};
 
 	std::vector<PointLight> lights;
-	std::vector<uint32_t> offsets;
-	std::vector<uint32_t> indices;
 	LightParams lightParams{};
 
 	uint32_t numClusters;
@@ -392,7 +390,7 @@ public:
 	bool _isInitialized{ false };
 	int _frameNumber{ 0 };
 	bool stop_rendering{ false };
-	VkExtent2D _windowExtent{ 1920 , 1080 };
+	VkExtent2D _windowExtent{ 1600 , 900 };
 	struct SDL_Window* _window{ nullptr }; // forward declaration
 
 	VkInstance _instance;

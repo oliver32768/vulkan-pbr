@@ -1966,6 +1966,10 @@ void GLTFMetallic_Roughness::clear_resources(VkDevice device) {
     vkDestroyPipelineLayout(device, transparentPipeline.layout, nullptr); // opaque pipeline uses a handle to the same pipeline layout
     vkDestroyPipeline(device, transparentPipeline.pipeline, nullptr);
     vkDestroyPipeline(device, opaquePipeline.pipeline, nullptr);
+
+    vkDestroyDescriptorSetLayout(device, zPrepassLayout, nullptr);
+    vkDestroyPipelineLayout(device, zPrepassPipeline.layout, nullptr); // opaque pipeline uses a handle to the same pipeline layout
+    vkDestroyPipeline(device, zPrepassPipeline.pipeline, nullptr);
 }
 
 MaterialInstance GLTFMetallic_Roughness::write_z_prepass_material(VkDevice device, MaterialPass pass, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator) {
@@ -2259,6 +2263,12 @@ void VulkanEngine::init_cluster_cull_compute_pipeline() {
     };
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &_lightRes.cullPipeline));
     vkDestroyShaderModule(_device, cs, nullptr);
+
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroyPipeline(_device, _lightRes.cullPipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _lightRes.cullPipelineLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _lightRes.cullSetLayout, nullptr);
+    });
 }
 
 CompactActiveClusters VulkanEngine::compact_active_clusters(VkCommandBuffer cmd, AllocatedBuffer activeClusterBitfield) {
@@ -2373,6 +2383,12 @@ void VulkanEngine::init_compact_cluster_pipeline() {
     };
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &_lightRes.compactPipeline));
     vkDestroyShaderModule(_device, cs, nullptr);
+
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroyPipeline(_device, _lightRes.compactPipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _lightRes.compactPipelineLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _lightRes.compactSetLayout, nullptr);
+    });
 }
 
 void VulkanEngine::init_active_cluster_compute_pipeline() {
@@ -2420,6 +2436,15 @@ void VulkanEngine::init_active_cluster_compute_pipeline() {
     sci.maxLod = 0.0f; // no mips on a depth buffer
     sci.compareEnable = VK_FALSE; // set TRUE + sampler2DShadow only if doing PCF/compare
     VK_CHECK(vkCreateSampler(_device, &sci, nullptr, &_lightRes.depthSampler));
+
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroySampler(_device, _lightRes.depthSampler, nullptr);
+
+        vkDestroyPipeline(_device, _lightRes.activePipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _lightRes.activePipelineLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _lightRes.activeSetLayout, nullptr);
+    });
+
 }
 
 AllocatedBuffer VulkanEngine::determine_active_clusters(VkCommandBuffer cmd) {
@@ -2579,6 +2604,12 @@ void VulkanEngine::init_cluster_building_compute_pipeline() {
     };
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &_lightRes.builderPipeline));
     vkDestroyShaderModule(_device, cs, nullptr);
+
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroyPipeline(_device, _lightRes.builderPipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _lightRes.builderPipelineLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _lightRes.builderSetLayout, nullptr);
+    });
 }
 
 // Point lights
@@ -2599,6 +2630,11 @@ void VulkanEngine::init_point_light_descriptor_set() {
     _lightRes.descriptorAllocator = DescriptorAllocatorGrowable{};
     _lightRes.descriptorAllocator.init(_device, 64, std::span(sizes));
     _lightRes.set = _lightRes.descriptorAllocator.allocate(_device, _lightRes.setLayout);
+
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroyDescriptorSetLayout(_device, _lightRes.setLayout, nullptr);
+        _lightRes.descriptorAllocator.destroy_pools(_device);
+    });
 }
 
 // Shadow mapping
@@ -2686,6 +2722,21 @@ void VulkanEngine::init_shadow_mapping_pipeline() {
 
     vkDestroyShaderModule(_device, shadowFragShader, nullptr);
     vkDestroyShaderModule(_device, shadowVertexShader, nullptr);
+
+    _mainDeletionQueue.push_function([=, this]() {
+       for (VkImageView v : _shadowRes.layerViews) {
+           if (v != VK_NULL_HANDLE) {
+               vkDestroyImageView(_device, v, nullptr);
+           }
+        }
+         _shadowRes.layerViews.clear();
+
+        destroy_image(_shadowRes.shadowMap);
+
+        vkDestroyPipeline(_device, _shadowRes.prepassPipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _shadowRes.prepassPipelineLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _shadowRes.prepassSetLayout, nullptr);
+    });
 }
 
 void VulkanEngine::init_shadow_mapping_descriptor_set() {
@@ -2718,6 +2769,13 @@ void VulkanEngine::init_shadow_mapping_descriptor_set() {
         b.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER); 
         _shadowRes.shadowUboSetLayout = b.build(_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
     }
+
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroySampler(_device, _shadowRes.shadowSampler, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _shadowRes.shadowSetLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _shadowRes.shadowUboSetLayout, nullptr);
+        _shadowRes.descriptorAllocator.destroy_pools(_device);
+     });
 }
 
 LightInfo VulkanEngine::compute_light_space_matrix(float near, float far, const glm::mat4& view, const glm::vec4& lightDir4) {
@@ -2831,6 +2889,12 @@ void VulkanEngine::init_brdf_integration_pipeline() {
     };
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &_ibl.brdfPipeline));
     vkDestroyShaderModule(_device, cs, nullptr);
+
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroyPipeline(_device, _ibl.brdfPipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _ibl.brdfPipelineLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _ibl.brdfSetLayout, nullptr);
+    });
 }
 
 AllocatedImage VulkanEngine::generate_brdf_lut(uint32_t size, bool mipmapped) {
@@ -2894,6 +2958,10 @@ AllocatedImage VulkanEngine::generate_brdf_lut(uint32_t size, bool mipmapped) {
     // cleanup the temporary per-face views
     vkDestroyImageView(_device, lutView, nullptr);
 
+    _mainDeletionQueue.push_function([=, this]() {
+        destroy_image(_ibl.brdfLUT);
+     });
+
     return _ibl.brdfLUT;
 }
 
@@ -2930,6 +2998,12 @@ void VulkanEngine::init_prefiltered_cubemap_pipeline() {
     };
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &_ibl.prefilterPipeline));
     vkDestroyShaderModule(_device, cs, nullptr);
+
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroyPipeline(_device, _ibl.prefilterPipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _ibl.prefilterPipelineLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _ibl.prefilterSetLayout, nullptr);
+    });
 }
 
 AllocatedImage VulkanEngine::generate_prefiltered_map_from_cubemap(uint32_t cubeSize) {
@@ -3003,6 +3077,10 @@ AllocatedImage VulkanEngine::generate_prefiltered_map_from_cubemap(uint32_t cube
         vkDestroyImageView(_device, prefilterMipViews[m], nullptr);
     }
 
+    _mainDeletionQueue.push_function([=, this]() {
+        destroy_image(_ibl.prefilteredmap);
+    });
+
     return _ibl.prefilteredmap;
 }
 
@@ -3039,6 +3117,12 @@ void VulkanEngine::init_irradiance_cubemap_pipeline() {
     };
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &_ibl.irradiancePipeline));
     vkDestroyShaderModule(_device, cs, nullptr);
+
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroyPipeline(_device, _ibl.irradiancePipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _ibl.irradiancePipelineLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _ibl.irradianceSetLayout, nullptr);
+    });
 }
 
 AllocatedImage VulkanEngine::generate_irradiance_map_from_cubemap(uint32_t cubeSize, bool mipmapped) {
@@ -3092,6 +3176,10 @@ AllocatedImage VulkanEngine::generate_irradiance_map_from_cubemap(uint32_t cubeS
 
     // cleanup the temporary per-face views
     vkDestroyImageView(_device, cubeArrayView, nullptr);
+
+    _mainDeletionQueue.push_function([=, this]() {
+        destroy_image(_ibl.irradiancemap);
+    });
 
     return _ibl.irradiancemap;
 }
@@ -3153,6 +3241,12 @@ void VulkanEngine::init_equirect_to_cubemap_pipeline() {
     };
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &_ibl.convertPipeline));
     vkDestroyShaderModule(_device, cs, nullptr);
+
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroyPipeline(_device, _ibl.convertPipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _ibl.convertPipelineLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _ibl.convertSetLayout, nullptr);
+    });
 }
 
 AllocatedImage VulkanEngine::generate_cubemap_from_hdr(const char* hdrPath, uint32_t cubeSize, bool mipmapped) {
@@ -3231,6 +3325,12 @@ AllocatedImage VulkanEngine::generate_cubemap_from_hdr(const char* hdrPath, uint
         });
     }
 
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroySampler(_device, _ibl.linearClampSampler, nullptr);
+        destroy_image(_ibl.equirect);
+        destroy_image(_ibl.cubemap);
+    });
+
     // cleanup the temporary per-face views
     vkDestroyImageView(_device, cubeArrayView, nullptr);
 
@@ -3260,4 +3360,9 @@ void VulkanEngine::init_ibl_descriptor_set() {
     w.write_image(2, _ibl.prefilteredmap.imageView, envSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     w.write_image(3, _ibl.brdfLUT.imageView, envSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     w.update_set(_device, _ibl.iblSet);
+
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroyDescriptorSetLayout(_device, _ibl.iblSetLayout, nullptr);
+        _ibl.descriptorAllocator.destroy_pools(_device);
+    });
 }
