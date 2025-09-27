@@ -31,7 +31,7 @@ Vulkan (1.3) real-time Physically Based Rendering engine, using Dynamic Renderin
 *Figure 1: Bistro (512 point lights at 250 FPS)*
 
 ![Cluster light count visualisation](./readme-images/1.png)
-*Figure 2: Visualisation of the light counts for the cluster at each fragment (Green = 0, Red = 128)*
+*Figure 2: Visualisation of the light counts for the cluster at each fragment (Green = 0 to Red = 64+)*
 
 ![Directional shadow cascades visualisation](./readme-images/2.png)
 *Figure 3: Shadow cascade visualisation*
