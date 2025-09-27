@@ -522,6 +522,14 @@ public:
 
 	void draw_geometry(VkCommandBuffer cmd);
 
+	void final_render(VkCommandBuffer cmd, VkViewport viewport, VkRect2D scissor, VkDescriptorSet globalDescriptor, AllocatedBuffer PointLightsBuffer, size_t PointLightsSize, ClusterCullOutput clusterCullOutput, const std::vector<uint32_t>& opaque_draws);
+
+	void csm_depth_prepass(VkCommandBuffer cmd, VkViewport shadowViewport, VkRect2D shadowScissor);
+
+	ClusterCullOutput clustering_pass(VkCommandBuffer cmd, VkViewport viewport, VkRect2D scissor, const std::vector<uint32_t>& opaque_draws, VkDescriptorSet globalDescriptor, AllocatedBuffer pointLightBuffer);
+
+	AllocatedBuffer write_buffer(void* data, size_t size, VkBufferUsageFlagBits usage, VmaMemoryUsage memoryUsage);
+
 	void resize_swapchain();
 
 	void init_default_data();
