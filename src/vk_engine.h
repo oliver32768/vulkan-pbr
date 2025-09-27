@@ -390,7 +390,7 @@ public:
 	bool _isInitialized{ false };
 	int _frameNumber{ 0 };
 	bool stop_rendering{ false };
-	VkExtent2D _windowExtent{ 1600 , 900 };
+	VkExtent2D _windowExtent{ 1600, 900 };
 	struct SDL_Window* _window{ nullptr }; // forward declaration
 
 	VkInstance _instance;

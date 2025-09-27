@@ -212,6 +212,19 @@ uint clusterIndexFromWorldPos(vec3 worldPos, float zNear, float zFar) {
     return (z * u.gridDim.y + tileY) * u.gridDim.x + tileX;
 }
 
+vec3 greenRedGradient(float t) {
+    t = clamp(t, 0.0, 1.0);
+    if (t < 0.5) {
+        // Green to yellow
+        float f = t / 0.5;
+        return mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 0.0), f);
+    } else {
+        // Yellow to red
+        float f = (t - 0.5) / 0.5;
+        return mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), f);
+    }
+}
+
 void main() {
     vec3 camPos = inverse(sceneData.view)[3].xyz;
 
@@ -305,7 +318,7 @@ void main() {
     }
 
     outFragColor = vec4(color, alphaOut);
-    //outFragColor = vec4(vec3(count / 128.0), alphaOut);
+    //outFragColor = vec4(greenRedGradient(count / 64.0), alphaOut);
     //outFragColor = vec4(vec3(clusterIndex / float(u.gridDim.x * u.gridDim.y * u.gridDim.z)), alphaOut);
     //outFragColor = vec4(materialData.emissiveFactors.xyz, alphaOut);
 }
