@@ -24,6 +24,9 @@ struct GLTFMetallic_Roughness {
 	MaterialPipeline zPrepassPipeline;
 	VkDescriptorSetLayout zPrepassLayout;
 
+	MaterialPipeline opaqueGeometryPipeline;
+	MaterialPipeline transparentGeometryPipeline;
+
 	struct MaterialConstants {
 		glm::vec4 colorFactors;
 		glm::vec4 metal_rough_factors;
@@ -55,6 +58,8 @@ struct GLTFMetallic_Roughness {
 	};
 
 	DescriptorWriter writer;
+
+	void build_geometry_prepass_pipeline(VulkanEngine* engine);
 
 	void build_z_prepass_pipeline(VulkanEngine* engine);
 
@@ -361,7 +366,12 @@ struct ClusteredLightResources {
 	VkPipelineLayout	  cullPipelineLayout{};
 	VkPipeline		      cullPipeline{};
 	VkDescriptorSet		  cullSet{};
-	
+};
+
+struct DeferredResources {
+	AllocatedImage albedoImg;
+	AllocatedImage normalImg;
+	AllocatedImage materialImg;
 };
 
 class VulkanEngine {
@@ -382,6 +392,8 @@ public:
 	ClusteredLightResources _lightRes;
 
 	ShadowMappingResources _shadowRes;
+
+	DeferredResources _deferredRes;
 
 	IBLResources _ibl;
 	VkPipelineLayout _skyboxPipelineLayout;
@@ -528,7 +540,9 @@ public:
 
 	ClusterCullOutput clustering_pass(VkCommandBuffer cmd, VkViewport viewport, VkRect2D scissor, const std::vector<uint32_t>& opaque_draws, VkDescriptorSet globalDescriptor, AllocatedBuffer pointLightBuffer);
 
-	AllocatedBuffer write_buffer(void* data, size_t size, VkBufferUsageFlagBits usage, VmaMemoryUsage memoryUsage);
+	void geometry_prepass(VkCommandBuffer cmd, VkViewport viewport, VkRect2D scissor, VkDescriptorSet globalDescriptor, const std::vector<uint32_t>& opaque_draws);
+
+	void z_prepass(VkCommandBuffer cmd, VkViewport viewport, VkRect2D scissor, VkDescriptorSet globalDescriptor, const std::vector<uint32_t>& opaque_draws);
 
 	void resize_swapchain();
 
@@ -552,6 +566,7 @@ public:
 private:
 	void init_vulkan();
 	void init_swapchain();
+	void init_deferred_images();
 	void init_commands();
 	void init_sync_structures();
 

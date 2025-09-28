@@ -9,14 +9,19 @@ class PipelineBuilder {
 public:
     std::vector<VkPipelineShaderStageCreateInfo> _shaderStages;
 
+    std::vector<VkFormat> _colorAttachmentFormats;
+    VkPipelineColorBlendAttachmentState _defaultBlendAttachment{
+       .blendEnable = VK_FALSE,
+       .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
+    };
+    std::vector<VkPipelineColorBlendAttachmentState> _blendAttachments;
+
     VkPipelineInputAssemblyStateCreateInfo _inputAssembly;
     VkPipelineRasterizationStateCreateInfo _rasterizer;
-    VkPipelineColorBlendAttachmentState _colorBlendAttachment;
     VkPipelineMultisampleStateCreateInfo _multisampling;
     VkPipelineLayout _pipelineLayout;
     VkPipelineDepthStencilStateCreateInfo _depthStencil;
     VkPipelineRenderingCreateInfo _renderInfo;
-    VkFormat _colorAttachmentformat;
 
     PipelineBuilder() { clear(); }
 
@@ -29,6 +34,8 @@ public:
     void enable_depthtest(bool depthWriteEnable, VkCompareOp op);
     void disable_depthtest();
     void set_color_attachment_format(VkFormat format);
+    void set_color_attachment_formats(std::span<const VkFormat> fmts);
+    void set_color_attachment_formats(std::initializer_list<VkFormat> fmts);
     void disable_color_attachments();
     void set_depth_format(VkFormat format);
     void disable_blending();
