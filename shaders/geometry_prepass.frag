@@ -64,7 +64,7 @@ void main() {
     float roughness = mrTex.x * materialData.metal_rough_factors.y;
 
     float ao = texture(AOTex, vUV).r;
-    vec3  emissive = texture(emissiveTex, vUV).rgb * materialData.emissiveFactors.rgb;
+    vec3 emissive = texture(emissiveTex, vUV).rgb * materialData.emissiveFactors.rgb;
     float emissiveI = max(max(emissive.r, emissive.g), emissive.b); // intensity proxy
 
     outMaterial = vec4(metallic, roughness, ao, emissiveI);

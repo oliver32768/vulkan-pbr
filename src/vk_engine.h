@@ -372,9 +372,16 @@ struct ClusteredLightResources {
 };
 
 struct DeferredResources {
+	DescriptorAllocatorGrowable descriptorAllocator;
+
 	AllocatedImage albedoImg;
 	AllocatedImage normalImg;
 	AllocatedImage materialImg;
+
+	VkDescriptorSetLayout shadingSetLayout{};
+	VkPipelineLayout	  shadingPipelineLayout{};
+	VkPipeline		      shadingPipeline{};
+	VkDescriptorSet		  shadingSet{};
 };
 
 class VulkanEngine {
@@ -385,6 +392,8 @@ public:
 	std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
 	float nearPlane;
 	float farPlane;
+
+	bool useDeferred = true;
 
 	float mAzimuth = glm::radians(180.0f);
 	float mZenith = glm::radians(20.0f);
@@ -484,6 +493,12 @@ public:
 	
 	void draw();
 	void run();
+
+	void init_deferred_shading_pipeline();
+
+	void init_gbuffer_descriptor_set();
+
+	void final_render_deferred(VkCommandBuffer cmd, VkViewport viewport, VkRect2D scissor, VkDescriptorSet globalDescriptor, AllocatedBuffer pointLightsBuffer, size_t pointLightsSize, ClusterCullOutput clusterCullOutput);
 
 	ClusterCullOutput clustered_light_culling(VkCommandBuffer cmd, AllocatedBuffer pointLights, AllocatedBuffer froxelAABBs, CompactActiveClusters activeClusters);
 

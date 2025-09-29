@@ -1165,6 +1165,9 @@ void VulkanEngine::init() {
     init_imgui();
     init_default_data();
 
+    init_gbuffer_descriptor_set();
+    init_deferred_shading_pipeline();
+
     mainCamera.velocity = glm::vec3(0.f);
     mainCamera.position = glm::vec3(-14.5, 2.5, -0.5);
     mainCamera.pitch = 0.0;
@@ -1377,7 +1380,13 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     csm_depth_prepass(cmd, shadowViewport, shadowScissor);
 
     // Actual Render (Skybox Pipeline + PBR Pipeline)
-    final_render(cmd, viewport, scissor, globalDescriptor, pointLightsBuffer, pointLightsSize, clusterCullOutput, opaque_draws);
+    if (useDeferred) {
+        final_render_deferred(cmd, viewport, scissor, globalDescriptor, pointLightsBuffer, pointLightsSize, clusterCullOutput);
+    }
+    else {
+        final_render(cmd, viewport, scissor, globalDescriptor, pointLightsBuffer, pointLightsSize, clusterCullOutput, opaque_draws);
+    }
+    
 
     // Delete RenderObjects
     mainDrawContext.OpaqueSurfaces.clear();
@@ -1386,6 +1395,81 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
     auto end = std::chrono::system_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
     stats.mesh_draw_time = elapsed.count() / 1000.f;
+}
+
+void VulkanEngine::final_render_deferred(
+    VkCommandBuffer cmd,
+    VkViewport viewport,
+    VkRect2D scissor,
+    VkDescriptorSet globalDescriptor,
+    AllocatedBuffer pointLightsBuffer, size_t pointLightsSize,
+    ClusterCullOutput clusterCullOutput
+) {
+    vkutil::transition_images(
+        cmd,
+        { _deferredRes.albedoImg.image, _deferredRes.normalImg.image, _deferredRes.materialImg.image },
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_ASPECT_COLOR_BIT
+    );
+
+    vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    VkClearValue clearValue = { 0.0, 0.0, 0.0, 0.0 };
+    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(_drawImage.imageView, &clearValue, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); 
+    VkRenderingInfo renderInfo = vkinit::rendering_info(_drawExtent, &colorAttachment, nullptr);
+
+    // Shadow data
+    AllocatedBuffer gpuCascadesBuffer = create_buffer(sizeof(GPUShadowCascades), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto* csmUBO = reinterpret_cast<GPUShadowCascades*>(gpuCascadesBuffer.allocation->GetMappedData());
+    for (uint32_t i = 0; i < NUM_CASCADES; ++i) { csmUBO->lightViewProj[i] = _shadowRes.dataPerCascade[i].lightSpaceMatrix; }
+    for (uint32_t i = 0; i <= NUM_CASCADES; ++i) { csmUBO->splitDepths[i].v = _shadowRes.cascadePlanes[i]; }
+    for (uint32_t i = 0; i < NUM_CASCADES; ++i) { csmUBO->orthoDims[i].v = _shadowRes.orthoDims[i]; }
+    _shadowRes.shadowUboSet = _shadowRes.descriptorAllocator.allocate(_device, _shadowRes.shadowUboSetLayout);
+    {
+        DescriptorWriter writer;
+        writer.write_buffer(0, gpuCascadesBuffer.buffer, sizeof(GPUShadowCascades), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        writer.update_set(_device, _shadowRes.shadowUboSet);
+    }
+
+    // Point light data
+    AllocatedBuffer lightParamBuffer = create_buffer(sizeof(LightParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto* lightParamPtr = reinterpret_cast<LightParams*>(lightParamBuffer.allocation->GetMappedData());
+    *lightParamPtr = _lightRes.lightParams;
+    _lightRes.set = _lightRes.descriptorAllocator.allocate(_device, _lightRes.setLayout);
+
+    // Write descriptors
+    {
+        DescriptorWriter writer;
+        writer.write_buffer(0, pointLightsBuffer.buffer, pointLightsSize, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(1, lightParamBuffer.buffer, sizeof(LightParams), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        writer.write_buffer(2, clusterCullOutput.LightGrid.buffer, _lightRes.numClusters * sizeof(LightGrid), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(3, clusterCullOutput.GlobalLightIndexList.buffer, 128 * _lightRes.numClusters * sizeof(uint32_t), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.update_set(_device, _lightRes.set);
+    }
+
+    get_current_frame()._deletionQueue.push_function([=, this] {
+        destroy_buffer(gpuCascadesBuffer);
+        destroy_buffer(lightParamBuffer);
+    });
+
+    glm::ivec4 push_constants;
+    push_constants.x = _drawExtent.width;
+    push_constants.y = _drawExtent.height;
+
+    vkCmdBeginRendering(cmd, &renderInfo);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _deferredRes.shadingPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _deferredRes.shadingPipelineLayout, 0, 1, &globalDescriptor, 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _deferredRes.shadingPipelineLayout, 1, 1, &_ibl.iblSet, 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _deferredRes.shadingPipelineLayout, 2, 1, &_shadowRes.shadowSet, 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _deferredRes.shadingPipelineLayout, 3, 1, &_shadowRes.shadowUboSet, 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _deferredRes.shadingPipelineLayout, 4, 1, &_lightRes.set, 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _deferredRes.shadingPipelineLayout, 5, 1, &_deferredRes.shadingSet, 0, nullptr);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdPushConstants(cmd, _deferredRes.shadingPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(glm::ivec4), &push_constants);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
 }
 
 void VulkanEngine::final_render(
@@ -1601,8 +1685,13 @@ ClusterCullOutput VulkanEngine::clustering_pass(VkCommandBuffer cmd, VkViewport 
     AllocatedBuffer froxelAABBs = build_cluster_grid(cmd); // TODO: Only run this if frustum changes shape, not every frame
 
     // 2. Z pre-pass
-    //z_prepass(cmd, viewport, scissor, globalDescriptor, opaque_draws);
-    geometry_prepass(cmd, viewport, scissor, globalDescriptor, opaque_draws);
+    if (useDeferred) {
+        geometry_prepass(cmd, viewport, scissor, globalDescriptor, opaque_draws);
+    }
+    else {
+        z_prepass(cmd, viewport, scissor, globalDescriptor, opaque_draws);
+    }
+    
 
     // 3. Find visible clusters
     AllocatedBuffer activeClusterBitset = determine_active_clusters(cmd);
@@ -1874,6 +1963,9 @@ void VulkanEngine::run() {
         ImGui::Text("update time %f ms", stats.scene_update_time);
         ImGui::Text("triangles %i", stats.triangle_count);
         ImGui::Text("draws %i", stats.drawcall_count);
+        if (ImGui::Button(useDeferred ? "Use Forward" : "Use Deferred")) {
+            useDeferred = !useDeferred;
+        }
         ImGui::End();
 
         // Lighting controls
@@ -1969,6 +2061,96 @@ void VulkanEngine::run() {
         auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
         stats.frametime = elapsed.count() / 1000.f;
     }
+}
+
+// Deferred
+
+void VulkanEngine::init_gbuffer_descriptor_set() {
+    DescriptorLayoutBuilder b;
+    b.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // albedo
+    b.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // normal
+    b.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // metal/rough/ao/emissive
+    b.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // depth
+    _deferredRes.shadingSetLayout = b.build(_device, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT);
+
+    DescriptorAllocatorGrowable::PoolSizeRatio sizes[] = {
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8.0f }
+    };
+    _deferredRes.descriptorAllocator = DescriptorAllocatorGrowable{};
+    _deferredRes.descriptorAllocator.init(_device, 64, std::span(sizes));
+    _deferredRes.shadingSet = _deferredRes.descriptorAllocator.allocate(_device, _deferredRes.shadingSetLayout);
+
+    DescriptorWriter w;
+    w.write_image(0, _deferredRes.albedoImg.imageView, _defaultSamplerLinear, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    w.write_image(1, _deferredRes.normalImg.imageView, _defaultSamplerLinear, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    w.write_image(2, _deferredRes.materialImg.imageView, _defaultSamplerLinear, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    w.write_image(3, _depthImage.imageView, _defaultSamplerNearest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    w.update_set(_device, _deferredRes.shadingSet);
+
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroyDescriptorSetLayout(_device, _deferredRes.shadingSetLayout, nullptr);
+        _deferredRes.descriptorAllocator.destroy_pools(_device);
+    });
+}
+
+void VulkanEngine::init_deferred_shading_pipeline() {
+    VkShaderModule fragShader;
+    if (!vkutil::load_shader_module("../../shaders/deferred_shading.frag.spv", _device, &fragShader)) {
+        fmt::print("Error when building the deferred shading fragment shader \n");
+    }
+    else {
+        fmt::print("Deferred shading fragment shader succesfully loaded \n");
+    }
+
+    VkShaderModule vertShader;
+    if (!vkutil::load_shader_module("../../shaders/deferred_shading.vert.spv", _device, &vertShader)) {
+        fmt::print("Error when building the deferred shading vertex shader \n");
+    }
+    else {
+        fmt::print("Deferred shading vertex shader succesfully loaded \n");
+    }
+
+    VkPushConstantRange screenDimsRange{};
+    screenDimsRange.offset = 0;
+    screenDimsRange.size = sizeof(glm::ivec4); // .xy
+    screenDimsRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayout layouts[] = { 
+        _gpuSceneDataDescriptorLayout, 
+        _ibl.iblSetLayout,
+        _shadowRes.shadowSetLayout,
+        _shadowRes.shadowUboSetLayout,
+        _lightRes.setLayout,
+        _deferredRes.shadingSetLayout
+    };
+    VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
+    pipeline_layout_info.setLayoutCount = 6;
+    pipeline_layout_info.pSetLayouts = layouts;
+    pipeline_layout_info.pPushConstantRanges = &screenDimsRange;
+    pipeline_layout_info.pushConstantRangeCount = 1;
+    VK_CHECK(vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_deferredRes.shadingPipelineLayout));
+
+    PipelineBuilder pipelineBuilder;
+    pipelineBuilder._pipelineLayout = _deferredRes.shadingPipelineLayout; // use the triangle layout we created
+    pipelineBuilder.set_shaders(vertShader, fragShader); // connecting the vertex and fragment shaders to the pipeline
+    pipelineBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST); // it will draw triangles
+    pipelineBuilder.set_polygon_mode(VK_POLYGON_MODE_FILL); // filled triangles
+    pipelineBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE); // no backface culling
+    pipelineBuilder.set_multisampling_none(); // no multisampling
+    pipelineBuilder.disable_blending(); // no blending
+    //pipelineBuilder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL); // yes depth testing, but no depth writes
+    pipelineBuilder.disable_depthtest();
+    pipelineBuilder.set_color_attachment_format(_drawImage.imageFormat); // connect the image format we will draw into, from draw image
+    pipelineBuilder.set_depth_format(_depthImage.imageFormat);
+    _deferredRes.shadingPipeline = pipelineBuilder.build_pipeline(_device); // finally build the pipeline
+
+    vkDestroyShaderModule(_device, fragShader, nullptr);
+    vkDestroyShaderModule(_device, vertShader, nullptr);
+
+    _mainDeletionQueue.push_function([&]() {
+        vkDestroyPipelineLayout(_device, _deferredRes.shadingPipelineLayout, nullptr);
+        vkDestroyPipeline(_device, _deferredRes.shadingPipeline, nullptr);
+    });
 }
 
 // GLTF Metal-Roughness functions
