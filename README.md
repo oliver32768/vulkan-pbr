@@ -1,9 +1,9 @@
-# vulkan-pbr - Clustered Forward PBR Rendering Engine
+# vulkan-pbr - Clustered Deferred/Forward PBR Rendering Engine
 
 Vulkan (1.3) real-time Physically Based Rendering engine, using Dynamic Rendering. Built on top of [vkguide.dev](https://vkguide.dev) (chapters 0-5 inclusive)
 
 ## Rendering Features:
-- Clustered Forward Shading
+- Clustered Deferred/Forward Shading
   - Compute Shader based clustered light culling
 - Cascaded Shadow Mapping
   - Percentage Closer Filtering (PCF) using Poisson disc sampling
