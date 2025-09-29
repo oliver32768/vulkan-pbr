@@ -1601,7 +1601,8 @@ ClusterCullOutput VulkanEngine::clustering_pass(VkCommandBuffer cmd, VkViewport 
     AllocatedBuffer froxelAABBs = build_cluster_grid(cmd); // TODO: Only run this if frustum changes shape, not every frame
 
     // 2. Z pre-pass
-    z_prepass(cmd, viewport, scissor, globalDescriptor, opaque_draws); // TODO: Deferred shading Geometry pass would replace this
+    //z_prepass(cmd, viewport, scissor, globalDescriptor, opaque_draws);
+    geometry_prepass(cmd, viewport, scissor, globalDescriptor, opaque_draws);
 
     // 3. Find visible clusters
     AllocatedBuffer activeClusterBitset = determine_active_clusters(cmd);
@@ -1616,6 +1617,73 @@ ClusterCullOutput VulkanEngine::clustering_pass(VkCommandBuffer cmd, VkViewport 
 }
 
 void VulkanEngine::geometry_prepass(VkCommandBuffer cmd, VkViewport viewport, VkRect2D scissor, VkDescriptorSet globalDescriptor, const std::vector<uint32_t>& opaque_draws) {
+    MaterialPipeline* lastPipeline = nullptr;
+    MaterialInstance* lastMaterial = nullptr;
+    VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
+
+    auto geometryPrepass = [&](const RenderObject& r) {
+        if (r.geometryPrepassMaterial != lastMaterial) {
+            lastMaterial = r.geometryPrepassMaterial;
+            if (r.geometryPrepassMaterial->pipeline != lastPipeline) {
+                lastPipeline = r.geometryPrepassMaterial->pipeline;
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.geometryPrepassMaterial->pipeline->pipeline);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.geometryPrepassMaterial->pipeline->layout, 0, 1, &globalDescriptor, 0, nullptr);
+
+                vkCmdSetViewport(cmd, 0, 1, &viewport);
+                vkCmdSetScissor(cmd, 0, 1, &scissor);
+            }
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.geometryPrepassMaterial->pipeline->layout, 1, 1, &r.geometryPrepassMaterial->materialSet, 0, nullptr);
+        }
+
+        // rebind index buffer if needed. != operator here is just comparing handles
+        if (r.indexBuffer != lastIndexBuffer) {
+            lastIndexBuffer = r.indexBuffer;
+            vkCmdBindIndexBuffer(cmd, r.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        }
+
+        // calculate final mesh matrix
+        GPUDrawPushConstants push_constants;
+        push_constants.worldMatrix = r.transform;
+        push_constants.vertexBuffer = r.vertexBufferAddress;
+        vkCmdPushConstants(cmd, r.geometryPrepassMaterial->pipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &push_constants);
+
+        vkCmdDrawIndexed(cmd, r.indexCount, 1, r.firstIndex, 0, 0);
+
+        //stats
+        stats.drawcall_count++;
+        stats.triangle_count += r.indexCount / 3;
+    };
+
+    VkClearValue clearBlack{ .color = { {0.f, 0.f, 0.f, 0.f} } };
+    VkClearValue clearNormal{ .color = { {0.5f, 0.5f, 1.0f, 0.f} } };
+    VkClearValue clearMat{ .color = { {0.f, 0.f, 0.f, 0.f} } };
+    VkRenderingAttachmentInfo albedoAtt = vkinit::attachment_info(_deferredRes.albedoImg.imageView, &clearBlack, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo normalAtt = vkinit::attachment_info(_deferredRes.normalImg.imageView, &clearNormal, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo materialAtt = vkinit::attachment_info(_deferredRes.materialImg.imageView, &clearMat, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo gbufferDepth = vkinit::depth_attachment_info(
+        _depthImage.imageView,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        0.0f, 0
+    );
+    std::array<VkRenderingAttachmentInfo, 3> gbufferColors{ albedoAtt, normalAtt, materialAtt };
+    VkRenderingInfo gbufferInfo = vkinit::rendering_info(_drawExtent, gbufferColors.data(), static_cast<uint32_t>(gbufferColors.size()), &gbufferDepth);
+
+    vkCmdBeginRendering(cmd, &gbufferInfo);
+
+    for (auto& r : opaque_draws) { // indices into OpaqueSurfaces sorted in order to minimize state changes
+        geometryPrepass(mainDrawContext.OpaqueSurfaces[r]);
+    }
+
+    for (auto& r : mainDrawContext.TransparentSurfaces) { 
+        geometryPrepass(r);
+    }
+
+    vkCmdEndRendering(cmd);
+}
+
+void VulkanEngine::z_prepass(VkCommandBuffer cmd, VkViewport viewport, VkRect2D scissor, VkDescriptorSet globalDescriptor, const std::vector<uint32_t>& opaque_draws) {
     MaterialPipeline* lastPipeline = nullptr;
     MaterialInstance* lastMaterial = nullptr;
     VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
@@ -1671,62 +1739,6 @@ void VulkanEngine::geometry_prepass(VkCommandBuffer cmd, VkViewport viewport, Vk
     vkCmdEndRendering(cmd);
 }
 
-void VulkanEngine::z_prepass(VkCommandBuffer cmd, VkViewport viewport, VkRect2D scissor, VkDescriptorSet globalDescriptor, const std::vector<uint32_t>& opaque_draws) {
-    MaterialPipeline* lastPipeline = nullptr;
-    MaterialInstance* lastMaterial = nullptr;
-    VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
-
-    auto preDepth = vkinit::depth_attachment_info(
-        _depthImage.imageView,
-        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        VK_ATTACHMENT_LOAD_OP_CLEAR,
-        VK_ATTACHMENT_STORE_OP_STORE,
-        0.0f, 0
-    );
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, metalRoughMaterial.zPrepassPipeline.pipeline);
-
-    vkCmdSetViewport(cmd, 0, 1, &viewport);
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-    auto zPrepass = [&](const RenderObject& r) {
-        if (r.zPrepassMaterial != lastMaterial) {
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, metalRoughMaterial.zPrepassPipeline.layout, 0, 1, &globalDescriptor, 0, nullptr);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, metalRoughMaterial.zPrepassPipeline.layout, 1, 1, &r.zPrepassMaterial->materialSet, 0, nullptr);
-
-            lastMaterial = r.zPrepassMaterial;
-            lastPipeline = r.zPrepassMaterial->pipeline;
-        }
-
-        // rebind index buffer if needed. != operator here is just comparing handles
-        if (r.indexBuffer != lastIndexBuffer) {
-            lastIndexBuffer = r.indexBuffer;
-            vkCmdBindIndexBuffer(cmd, r.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-        }
-
-        // calculate final mesh matrix
-        GPUDrawPushConstants push_constants;
-        push_constants.worldMatrix = r.transform;
-        push_constants.vertexBuffer = r.vertexBufferAddress;
-        vkCmdPushConstants(cmd, metalRoughMaterial.zPrepassPipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &push_constants);
-
-        vkCmdDrawIndexed(cmd, r.indexCount, 1, r.firstIndex, 0, 0);
-
-        // stats
-        stats.drawcall_count++;
-        stats.triangle_count += r.indexCount / 3;
-        };
-
-    VkRenderingInfo zPrepassRenderInfo = vkinit::rendering_info(_drawExtent, nullptr, &preDepth);
-    vkCmdBeginRendering(cmd, &zPrepassRenderInfo);
-
-    for (auto& r : opaque_draws) { // indices into OpaqueSurfaces sorted in order to minimize state changes
-        zPrepass(mainDrawContext.OpaqueSurfaces[r]);
-    }
-
-    vkCmdEndRendering(cmd);
-}
-
 void VulkanEngine::draw_background(VkCommandBuffer cmd) {    
     ComputeEffect& effect = backgroundEffects[currentBackgroundEffect]; // idx edited by ImGui
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, effect.pipeline); // compute pipeline
@@ -1762,7 +1774,13 @@ void VulkanEngine::draw() {
 
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
 
-    vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); // gfx pipeline draws into color optimal layout
+    vkutil::transition_images(
+        cmd,
+        { _drawImage.image, _deferredRes.albedoImg.image, _deferredRes.normalImg.image, _deferredRes.materialImg.image },
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_ASPECT_COLOR_BIT
+    );
     vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
     draw_geometry(cmd);
 
@@ -1998,7 +2016,7 @@ void GLTFMetallic_Roughness::build_geometry_prepass_pipeline(VulkanEngine* engin
     pipelineBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
     pipelineBuilder.set_multisampling_none();
     pipelineBuilder.disable_blending();
-    pipelineBuilder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL); // reversed z
+    pipelineBuilder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL); // reversed z
 
     // render format
     pipelineBuilder.set_color_attachment_formats({ 
@@ -2242,6 +2260,25 @@ MaterialInstance GLTFMetallic_Roughness::write_material(VkDevice device, Materia
     return matData;
 }
 
+MaterialInstance GLTFMetallic_Roughness::write_geometry_prepass_material(VkDevice device, MaterialPass pass, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator, VkDescriptorSet materialSet) {
+    MaterialInstance matData;
+
+    // select opaque or transparent pipeline
+    matData.passType = pass;
+    if (pass == MaterialPass::Transparent) {
+        matData.pipeline = &transparentGeometryPipeline;
+    }
+    else {
+        matData.pipeline = &opaqueGeometryPipeline;
+    }
+
+    // alloc. descriptor set
+    matData.materialSet = materialSet;
+
+    // return as struct to be used during command buffer recording
+    return matData;
+}
+
 // Mesh Node functions
 
 void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx) {
@@ -2252,12 +2289,13 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx) {
         def.indexCount = s.count;
         def.firstIndex = s.startIndex;
         def.indexBuffer = mesh->meshBuffers.indexBuffer.buffer;
-        def.material = &s.material->data;
         def.transform = nodeMatrix;
         def.vertexBufferAddress = mesh->meshBuffers.vertexBufferAddress;
         def.bounds = s.bounds;
 
+        def.material = &s.material->data;
         def.zPrepassMaterial = &s.material->zPrepassData;
+        def.geometryPrepassMaterial = &s.material->geometryPrepassData;
 
         if (s.material->data.passType == MaterialPass::Transparent) {
             ctx.TransparentSurfaces.push_back(def);

@@ -22,6 +22,7 @@ enum ImageUse : uint32_t {
 struct GLTFMaterial {
 	MaterialInstance data;
     MaterialInstance zPrepassData;
+    MaterialInstance geometryPrepassData;
 };
 
 struct Bounds { // oriented bounding box for frustum culling

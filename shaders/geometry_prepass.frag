@@ -42,6 +42,9 @@ void main() {
     // Base color / albedo (modulate by vertex color)
     vec4 baseColorTex = texture(colorTex, vUV);
     vec4 baseColor = baseColorTex * materialData.colorFactors * vVertexColor;
+    if (baseColor.w < 0.25) {
+        discard;
+    }
     outAlbedo = baseColor; // includes alpha
 
     // Normals
@@ -56,7 +59,7 @@ void main() {
     //   .g = roughness
     //   .b = ao
     //   .a = emissiveIntensity (or unused)
-    vec2 mrTex = texture(metalRoughTex, vUV).bg; // roughness.g, metallic.b
+    vec2 mrTex = texture(metalRoughTex, vUV).gb; // roughness.g, metallic.b
     float metallic = mrTex.y * materialData.metal_rough_factors.x;
     float roughness = mrTex.x * materialData.metal_rough_factors.y;
 

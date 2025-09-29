@@ -64,6 +64,34 @@ void vkutil::transition_image(VkCommandBuffer cmd, VkImage image, VkImageLayout 
     vkCmdPipelineBarrier2(cmd, &depInfo);
 }
 
+void vkutil::transition_images(VkCommandBuffer cmd, std::initializer_list<VkImage> images, VkImageLayout currentLayout, VkImageLayout newLayout, VkImageAspectFlags aspect) {
+    std::vector<VkImageMemoryBarrier2> barriers(images.size());
+
+    size_t i = 0;
+    for (VkImage img : images) {
+        VkImageMemoryBarrier2& b = barriers[i++];
+        b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
+        b.pNext = nullptr;
+
+        b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+        b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        b.dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
+
+        b.oldLayout = currentLayout;
+        b.newLayout = newLayout;
+
+        b.subresourceRange = vkinit::image_subresource_range(aspect);
+        b.image = img;
+    }
+
+    VkDependencyInfo depInfo{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+    depInfo.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
+    depInfo.pImageMemoryBarriers = barriers.data();
+
+    vkCmdPipelineBarrier2(cmd, &depInfo);
+}
+
 void vkutil::copy_image_to_image(VkCommandBuffer cmd, VkImage source, VkImage destination, VkExtent2D srcSize, VkExtent2D dstSize)
 {
 	VkImageBlit2 blitRegion{ 

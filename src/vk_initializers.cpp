@@ -214,6 +214,25 @@ VkRenderingInfo vkinit::rendering_info(VkExtent2D renderExtent, VkRenderingAttac
 
     return renderInfo;
 }
+
+VkRenderingInfo vkinit::rendering_info(
+    VkExtent2D renderExtent,
+    const VkRenderingAttachmentInfo* colorAttachments,
+    uint32_t colorAttachmentCount,
+    const VkRenderingAttachmentInfo* depthAttachment)
+{
+    VkRenderingInfo renderInfo{};
+    renderInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    renderInfo.renderArea = { {0, 0}, renderExtent };
+    renderInfo.layerCount = 1;
+
+    renderInfo.colorAttachmentCount = colorAttachmentCount;
+    renderInfo.pColorAttachments = colorAttachments;
+
+    renderInfo.pDepthAttachment = depthAttachment;
+    renderInfo.pStencilAttachment = nullptr;
+    return renderInfo;
+}
 //< render_info
 //> subresource
 VkImageSubresourceRange vkinit::image_subresource_range(VkImageAspectFlags aspectMask)
@@ -228,8 +247,6 @@ VkImageSubresourceRange vkinit::image_subresource_range(VkImageAspectFlags aspec
     return subImage;
 }
 //< subresource
-
-
 
 VkDescriptorSetLayoutBinding vkinit::descriptorset_layout_binding(VkDescriptorType type, VkShaderStageFlags stageFlags,
     uint32_t binding)

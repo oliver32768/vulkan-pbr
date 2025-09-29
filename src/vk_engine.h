@@ -69,6 +69,8 @@ struct GLTFMetallic_Roughness {
 	MaterialInstance write_z_prepass_material(VkDevice device, MaterialPass pass, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator);
 
 	MaterialInstance write_material(VkDevice device, MaterialPass pass, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator);
+
+	MaterialInstance write_geometry_prepass_material(VkDevice device, MaterialPass pass, const MaterialResources& resources, DescriptorAllocatorGrowable& descriptorAllocator, VkDescriptorSet materialSet);
 };
 
 struct MeshNode : public Node {
@@ -84,6 +86,7 @@ struct RenderObject {
 
 	MaterialInstance* material;
 	MaterialInstance* zPrepassMaterial;
+	MaterialInstance* geometryPrepassMaterial;
 	
 	glm::mat4 transform;
 	VkDeviceAddress vertexBufferAddress;
