@@ -1,5 +1,14 @@
 #version 460
 
+layout(set = 0, binding = 0) uniform SceneData {
+	mat4 view;
+	mat4 proj;
+	mat4 viewproj;
+	vec4 ambientColor;
+	vec4 sunlightDirection; // w for sun power
+	vec4 sunlightColor;
+} sceneData;
+
 layout(set = 1, binding = 0) uniform GLTFMaterialData {
     vec4 colorFactors;
     vec4 metal_rough_factors;
@@ -42,10 +51,10 @@ mat3 buildTBN(vec3 N, vec3 pos, vec2 uv) {
 void main() {
     // Base color / albedo (modulate by vertex color)
     vec4 baseColorTex = texture(colorTex, vUV);
-    vec4 baseColor = baseColorTex * materialData.colorFactors * vVertexColor;
-    if (baseColor.w < 0.25) {
+    if (baseColorTex.w < 0.25) {
         discard;
     }
+    vec4 baseColor = baseColorTex * materialData.colorFactors * vVertexColor;
     outAlbedo = baseColor; // includes alpha
 
     // Normals

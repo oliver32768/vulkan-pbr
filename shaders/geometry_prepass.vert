@@ -48,7 +48,7 @@ void main() {
     Vertex v = PushConstants.vertexBuffer.vertices[gl_VertexIndex];
 
     vec4 worldPos = PushConstants.render_matrix * vec4(v.position, 1.0);
-    vec3 worldN = normalize(mat3(PushConstants.render_matrix) * v.normal);
+    vec3 worldN = normalize(mat3(transpose(inverse(PushConstants.render_matrix))) * v.normal); // normalize(mat3(PushConstants.render_matrix) * v.normal);
 
     vWorldPos = worldPos.xyz;
     vUV = vec2(v.uv_x, v.uv_y);
