@@ -41,7 +41,7 @@ struct GeoSurface {
 struct MeshAsset {
     std::string name;
     std::vector<GeoSurface> surfaces; // array of sub-meshes
-    GPUMeshBuffers meshBuffers;
+    GPUMeshBuffers meshBuffers; // index / vertex / vertex address buffers
 };
 
 // forward declaration
@@ -58,13 +58,9 @@ struct LoadedGLTF : public IRenderable {
 
     // nodes that dont have a parent, for iterating through the file in tree order
     std::vector<std::shared_ptr<Node>> topNodes;
-
     std::vector<VkSampler> samplers;
-
     DescriptorAllocatorGrowable descriptorPool; // for materials of this gltf
-
     AllocatedBuffer materialDataBuffer; // single buffer containing all of the material data for the file
-
     VulkanEngine* creator;
 
     ~LoadedGLTF() { clearAll(); };

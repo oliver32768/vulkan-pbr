@@ -1,4 +1,4 @@
-#version 450
+#version 460
 
 #extension GL_GOOGLE_include_directive : require
 #include "input_structures_pbr.glsl"
@@ -71,20 +71,15 @@ void main() {
     vec3 direct = (Fd + Fr) * L_i * cos_i;
 
     // --- IBL ---
-    const float MAX_REFLECTION_LOD = floor(log2(1024)) + 1; // use `textureQueryLevels`?
     vec3 F_NV = fresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
-
     vec3 kS_ibl = F_NV;
     vec3 kD_ibl = (1.0 - kS_ibl) * (1.0 - metallic); // not devsh
-  
     vec3 irradiance = texture(uIrradiance, N).rgb;
     vec3 diffuse = irradiance * (baseColor / PI);
-  
     int maxMip = textureQueryLevels(uPrefiltered) - 1;
     vec3 prefilteredColor = textureLod(uPrefiltered, R, roughness * maxMip).rgb; // idk if this should be roughness or roughness^2
     vec2 envBRDF = texture(uBrdfLUT, vec2(max(dot(N, V), 0.0), roughness)).rg; // same here
     vec3 specular = prefilteredColor * (F_NV * envBRDF.x + envBRDF.y);
-  
     vec3 ambient = (kD_ibl * diffuse + specular) * ao; 
 
     // --- Shadow Mapping ---
@@ -105,7 +100,5 @@ void main() {
     }
 
     outFragColor = vec4(color, alphaOut);
-    //outFragColor = vec4(greenRedGradient(count / 64.0), alphaOut);
-    //outFragColor = vec4(vec3(clusterIndex / float(u.gridDim.x * u.gridDim.y * u.gridDim.z)), alphaOut);
-    //outFragColor = vec4(materialData.emissiveFactors.xyz, alphaOut);
+    //outFragColor = vec4(metallic, roughness, ao, 1.0);
 }

@@ -1,4 +1,4 @@
-#version 450
+#version 460
 
 layout(set = 1, binding = 0) uniform GLTFMaterialData {
     vec4 colorFactors;
@@ -20,6 +20,7 @@ layout(location = 3) in vec4 vVertexColor;
 layout(location = 0) out vec4 outAlbedo;
 layout(location = 1) out vec4 outNormal;
 layout(location = 2) out vec4 outMaterial;
+layout(location = 3) out vec4 outGeoNormal;
 
 vec3 safeNormalize(vec3 v) { return normalize(v + 1e-8); }
 
@@ -48,11 +49,13 @@ void main() {
     outAlbedo = baseColor; // includes alpha
 
     // Normals
-    vec3 N = safeNormalize(vWorldNormal);
-    mat3 TBN = buildTBN(N, vWorldPos, vUV); // tangent to world
+    vec3 N = normalize(vWorldNormal);
     vec3 nm = texture(normalTex, vUV).xyz * 2.0 - 1.0; // assume linear texture, default (0.5, 0.5, 1)
+    mat3 TBN = buildTBN(N, vWorldPos, vUV); // tangent to world
     N = normalize(TBN * nm);
     outNormal = vec4(N, 1.0); // world space
+
+    outGeoNormal = vec4(normalize(vWorldNormal), 1.0);
 
     // Metallic/Roughness/AO/Emissive packing:
     //   .r = metallic

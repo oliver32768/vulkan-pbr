@@ -377,6 +377,7 @@ struct DeferredResources {
 	AllocatedImage albedoImg;
 	AllocatedImage normalImg;
 	AllocatedImage materialImg;
+	AllocatedImage geoNormalImg;
 
 	VkDescriptorSetLayout shadingSetLayout{};
 	VkPipelineLayout	  shadingPipelineLayout{};
@@ -584,6 +585,7 @@ public:
 private:
 	void init_vulkan();
 	void init_swapchain();
+	AllocatedImage init_gbuffer(VkExtent3D extent, VkImageUsageFlags usages, VmaAllocationCreateInfo allocInfo, VkFormat format);
 	void init_deferred_images();
 	void init_commands();
 	void init_sync_structures();

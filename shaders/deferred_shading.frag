@@ -1,4 +1,4 @@
-#version 450
+#version 460
 
 #extension GL_GOOGLE_include_directive : require
 #include "input_structures_deferred.glsl"
@@ -28,9 +28,9 @@ void main() {
     mat4 invProj = inverse(sceneData.proj);
 
     const float eps = 1e-6;
-    bool isBackground = (depth <= 0.0 + eps);
+    bool isBackground = (depth <= eps);
 
-    vec2 uv = (gl_FragCoord.xy + vec2(0.5)) / vec2(pc.screenSize.xy);
+    vec2 uv = (gl_FragCoord.xy) / vec2(pc.screenSize.xy);
     vec2 ndcXY = uv * 2.0 - 1.0;
 
     if (isBackground) {
@@ -41,10 +41,11 @@ void main() {
     }
 
     // fetch G-buffers
-    vec4  albedoSample = texelFetch(gAlbedo, px, 0);
+    vec4 albedoSample = texelFetch(gAlbedo, px, 0);
 
     // normals are stored as world-space float, no remap:
-    vec3 vWorldNormal = normalize(texelFetch(gNormal, px, 0).xyz);
+    vec3 N = normalize(texelFetch(gNormal, px, 0).xyz);
+    vec3 vWorldNormal = normalize(texelFetch(gGeoNormal, px, 0).xyz);
 
     // materials already include factors:
     vec4 M = texelFetch(gMaterial, px, 0);
@@ -54,13 +55,14 @@ void main() {
     float emissiveI = max(0.0, M.a);
 
     // baseColor already has colorFactors * vertexColor applied in G-buffer:
-    vec3 baseColor  = albedoSample.rgb;
+    vec3 baseColor = albedoSample.rgb;
     float alphaOut = albedoSample.a;
 
-    // reconstruct world pos (atp should I just make a pos gbuffer idk)
-    vec4 clipOrNdc = vec4(ndcXY, depth, 1.0); // NDC coords
-    vec4 worldH = invViewProj * clipOrNdc;
-    vec3 vWorldPos = worldH.xyz / worldH.w;
+    // reconstruct world pos
+    vec4 ndc = vec4(ndcXY, depth, 1.0); // NDC coords
+    vec4 viewH = inverse(sceneData.proj) * ndc;
+    vec3 viewP = viewH.xyz / viewH.w;   // perspective divide in view space
+    vec3 vWorldPos = (inverse(sceneData.view) * vec4(viewP, 1.0)).xyz;
     vec3 camPos = invView[3].xyz;
 
     // emissive is intensity only
@@ -68,13 +70,13 @@ void main() {
 
     // Lighting
     vec3 V = normalize(camPos - vWorldPos);
-    vec3 R = reflect(-V, vWorldNormal);
+    vec3 R = reflect(-V, N);
     vec3 L = normalize(sceneData.sunlightDirection.xyz); 
     vec3 H = normalize(V + L); 
 
-    float NoV = abs(dot(vWorldNormal, V)) + 1e-5;
-    float NoL = clamp(dot(vWorldNormal, L), 0.0, 1.0);
-    float NoH = clamp(dot(vWorldNormal, H), 0.0, 1.0);
+    float NoV = abs(dot(N, V)) + 1e-5;
+    float NoL = clamp(dot(N, L), 0.0, 1.0);
+    float NoH = clamp(dot(N, H), 0.0, 1.0);
     float VoH = clamp(dot(V, H), 0.0, 1.0);
 
     float alpha = roughness * roughness;
@@ -93,19 +95,19 @@ void main() {
     vec3 direct = (Fd + Fr) * L_i * NoL;
 
     // IBL
-    vec3 F_NV = fresnelSchlickRoughness(max(dot(vWorldNormal, V), 0.0), F0, roughness);
+    vec3 F_NV = fresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
     vec3 kS_ibl = F_NV;
     vec3 kD_ibl = (1.0 - kS_ibl) * (1.0 - metallic);
-    vec3 irradiance = texture(uIrradiance, vWorldNormal).rgb;
+    vec3 irradiance = textureLod(uIrradiance, N, 0.0).rgb; //texture(uIrradiance, N).rgb;
     vec3 diffuse = irradiance * (baseColor / PI);
     int  maxMip = textureQueryLevels(uPrefiltered) - 1;
     vec3 prefilteredColor = textureLod(uPrefiltered, R, roughness * maxMip).rgb;
-    vec2 envBRDF = texture(uBrdfLUT, vec2(max(dot(vWorldNormal, V), 0.0), roughness)).rg;
+    vec2 envBRDF = textureLod(uBrdfLUT, vec2(max(dot(N, V), 0.0), roughness), 0.0).rg; //texture(uBrdfLUT, vec2(max(dot(N, V), 0.0), roughness)).rg;
     vec3 specular = prefilteredColor * (F_NV * envBRDF.x + envBRDF.y);
     vec3 ambient = (kD_ibl * diffuse + specular) * ao; 
 
     // Shadow Mapping
-    float shadow = ShadowCalculation(vWorldPos, normalize(vWorldNormal), L);
+    float shadow = ShadowCalculation(vWorldPos, vWorldNormal, L);
     vec3 color = emissive + ambient + ((1.0 - shadow) * direct);
 
     // Point lights (clustered)
@@ -116,8 +118,9 @@ void main() {
     for (uint i = 0u; i < count; ++i) {
         uint li = globalLightIndexList[base + i];
         Light Lpt = lights[li];
-        color += shadePointLight(Lpt, vWorldPos, vWorldNormal, V, NoV, baseColor, F0, alpha, metallic);
+        color += shadePointLight(Lpt, vWorldPos, N, V, NoV, baseColor, F0, alpha, metallic);
     }
 
     outFragColor = vec4(color, alphaOut);
+    //outFragColor = vec4(metallic, roughness, ao, 1.0);
 }

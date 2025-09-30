@@ -984,53 +984,39 @@ void VulkanEngine::init_swapchain() {
     });
 }
 
+AllocatedImage VulkanEngine::init_gbuffer(VkExtent3D extent, VkImageUsageFlags usages, VmaAllocationCreateInfo allocInfo, VkFormat format) {
+    AllocatedImage img;
+    img.imageFormat = format;
+    img.imageExtent = extent;
+    VkImageCreateInfo imgInfo = vkinit::image_create_info(img.imageFormat, usages, extent);
+    vmaCreateImage(_allocator, &imgInfo, &allocInfo, &img.image, &img.allocation, nullptr);
+    VkImageViewCreateInfo viewInfo = vkinit::imageview_create_info(img.imageFormat, img.image, VK_IMAGE_ASPECT_COLOR_BIT);
+    VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &img.imageView));
+    _mainDeletionQueue.push_function([=]() {
+        vkDestroyImageView(_device, img.imageView, nullptr);
+        vmaDestroyImage(_allocator, img.image, img.allocation);
+    });
+    return img;
+}
+
 void VulkanEngine::init_deferred_images() {
     int display = SDL_GetWindowDisplayIndex(_window);
     SDL_DisplayMode dm{};
     SDL_GetDesktopDisplayMode(display, &dm);
     VkExtent3D renderTargetExtent = { dm.w, dm.h, 1 };
 
-    _deferredRes.albedoImg.imageFormat = VK_FORMAT_R8G8B8A8_UNORM;
-    _deferredRes.albedoImg.imageExtent = renderTargetExtent;
-    _deferredRes.normalImg.imageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-    _deferredRes.normalImg.imageExtent = renderTargetExtent;
-    _deferredRes.materialImg.imageFormat = VK_FORMAT_R8G8B8A8_UNORM;
-    _deferredRes.materialImg.imageExtent = renderTargetExtent;
-
     VkImageUsageFlags renderTargetUsages{};
     renderTargetUsages |= VK_IMAGE_USAGE_SAMPLED_BIT;
     renderTargetUsages |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
-    VkImageCreateInfo albedoImgInfo = vkinit::image_create_info(_deferredRes.albedoImg.imageFormat, renderTargetUsages, renderTargetExtent);
-    VkImageCreateInfo normalImgInfo = vkinit::image_create_info(_deferredRes.normalImg.imageFormat, renderTargetUsages, renderTargetExtent);
-    VkImageCreateInfo materialImgInfo = vkinit::image_create_info(_deferredRes.materialImg.imageFormat, renderTargetUsages, renderTargetExtent);
-
-    // Allocate all from GPU local memory
     VmaAllocationCreateInfo rtAllocInfo = {};
     rtAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
     rtAllocInfo.requiredFlags = VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    vmaCreateImage(_allocator, &albedoImgInfo, &rtAllocInfo, &_deferredRes.albedoImg.image, &_deferredRes.albedoImg.allocation, nullptr);
-    vmaCreateImage(_allocator, &normalImgInfo, &rtAllocInfo, &_deferredRes.normalImg.image, &_deferredRes.normalImg.allocation, nullptr);
-    vmaCreateImage(_allocator, &materialImgInfo, &rtAllocInfo, &_deferredRes.materialImg.image, &_deferredRes.materialImg.allocation, nullptr);
-
-    // Image views
-    VkImageViewCreateInfo albedoViewInfo = vkinit::imageview_create_info(_deferredRes.albedoImg.imageFormat, _deferredRes.albedoImg.image, VK_IMAGE_ASPECT_COLOR_BIT);
-    VkImageViewCreateInfo normalViewInfo = vkinit::imageview_create_info(_deferredRes.normalImg.imageFormat, _deferredRes.normalImg.image, VK_IMAGE_ASPECT_COLOR_BIT);
-    VkImageViewCreateInfo materialViewInfo = vkinit::imageview_create_info(_deferredRes.materialImg.imageFormat, _deferredRes.materialImg.image, VK_IMAGE_ASPECT_COLOR_BIT);
-
-    VK_CHECK(vkCreateImageView(_device, &albedoViewInfo, nullptr, &_deferredRes.albedoImg.imageView));
-    VK_CHECK(vkCreateImageView(_device, &normalViewInfo, nullptr, &_deferredRes.normalImg.imageView));
-    VK_CHECK(vkCreateImageView(_device, &materialViewInfo, nullptr, &_deferredRes.materialImg.imageView));
-
-    _mainDeletionQueue.push_function([=]() {
-        vkDestroyImageView(_device, _deferredRes.albedoImg.imageView, nullptr);
-        vmaDestroyImage(_allocator, _deferredRes.albedoImg.image, _deferredRes.albedoImg.allocation);
-        vkDestroyImageView(_device, _deferredRes.normalImg.imageView, nullptr);
-        vmaDestroyImage(_allocator, _deferredRes.normalImg.image, _deferredRes.normalImg.allocation);
-        vkDestroyImageView(_device, _deferredRes.materialImg.imageView, nullptr);
-        vmaDestroyImage(_allocator, _deferredRes.materialImg.image, _deferredRes.materialImg.allocation);
-    });
+    _deferredRes.albedoImg = init_gbuffer(renderTargetExtent, renderTargetUsages, rtAllocInfo, VK_FORMAT_R8G8B8A8_UNORM);
+    _deferredRes.normalImg = init_gbuffer(renderTargetExtent, renderTargetUsages, rtAllocInfo, VK_FORMAT_R16G16B16A16_SFLOAT);
+    _deferredRes.materialImg = init_gbuffer(renderTargetExtent, renderTargetUsages, rtAllocInfo, VK_FORMAT_R8G8B8A8_UNORM);
+    _deferredRes.geoNormalImg = init_gbuffer(renderTargetExtent, renderTargetUsages, rtAllocInfo, VK_FORMAT_R16G16B16A16_SFLOAT);
 }
 
 void VulkanEngine::init_vulkan() {
@@ -1180,9 +1166,7 @@ void VulkanEngine::init() {
     assert(helmetFile.has_value());
     loadedScenes["DamagedHelmet"] = *helmetFile;
 
-    //std::string bistroPath = { "..\\..\\assets\\shadow.glb" };
     std::string bistroPath = { "..\\..\\assets\\Bistro.glb" };
-    //std::string bistroPath = { "..\\..\\assets\\Sponza\\Sponza.gltf" };
     auto bistroFile = loadGltf(this, bistroPath);
     assert(bistroFile.has_value());
     loadedScenes["Bistro"] = *bistroFile;
@@ -1407,7 +1391,7 @@ void VulkanEngine::final_render_deferred(
 ) {
     vkutil::transition_images(
         cmd,
-        { _deferredRes.albedoImg.image, _deferredRes.normalImg.image, _deferredRes.materialImg.image },
+        { _deferredRes.albedoImg.image, _deferredRes.normalImg.image, _deferredRes.materialImg.image, _deferredRes.geoNormalImg.image },
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_IMAGE_ASPECT_COLOR_BIT
@@ -1749,6 +1733,7 @@ void VulkanEngine::geometry_prepass(VkCommandBuffer cmd, VkViewport viewport, Vk
     VkRenderingAttachmentInfo albedoAtt = vkinit::attachment_info(_deferredRes.albedoImg.imageView, &clearBlack, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo normalAtt = vkinit::attachment_info(_deferredRes.normalImg.imageView, &clearNormal, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo materialAtt = vkinit::attachment_info(_deferredRes.materialImg.imageView, &clearMat, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo geoNormalAtt = vkinit::attachment_info(_deferredRes.geoNormalImg.imageView, &clearNormal, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo gbufferDepth = vkinit::depth_attachment_info(
         _depthImage.imageView,
         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
@@ -1756,7 +1741,7 @@ void VulkanEngine::geometry_prepass(VkCommandBuffer cmd, VkViewport viewport, Vk
         VK_ATTACHMENT_STORE_OP_STORE,
         0.0f, 0
     );
-    std::array<VkRenderingAttachmentInfo, 3> gbufferColors{ albedoAtt, normalAtt, materialAtt };
+    std::array<VkRenderingAttachmentInfo, 4> gbufferColors{ albedoAtt, normalAtt, materialAtt, geoNormalAtt };
     VkRenderingInfo gbufferInfo = vkinit::rendering_info(_drawExtent, gbufferColors.data(), static_cast<uint32_t>(gbufferColors.size()), &gbufferDepth);
 
     vkCmdBeginRendering(cmd, &gbufferInfo);
@@ -1865,7 +1850,7 @@ void VulkanEngine::draw() {
 
     vkutil::transition_images(
         cmd,
-        { _drawImage.image, _deferredRes.albedoImg.image, _deferredRes.normalImg.image, _deferredRes.materialImg.image },
+        { _drawImage.image, _deferredRes.albedoImg.image, _deferredRes.normalImg.image, _deferredRes.materialImg.image, _deferredRes.geoNormalImg.image },
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_ASPECT_COLOR_BIT
@@ -2071,6 +2056,7 @@ void VulkanEngine::init_gbuffer_descriptor_set() {
     b.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // normal
     b.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // metal/rough/ao/emissive
     b.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // depth
+    b.add_binding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // geo normal
     _deferredRes.shadingSetLayout = b.build(_device, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT);
 
     DescriptorAllocatorGrowable::PoolSizeRatio sizes[] = {
@@ -2081,10 +2067,11 @@ void VulkanEngine::init_gbuffer_descriptor_set() {
     _deferredRes.shadingSet = _deferredRes.descriptorAllocator.allocate(_device, _deferredRes.shadingSetLayout);
 
     DescriptorWriter w;
-    w.write_image(0, _deferredRes.albedoImg.imageView, _defaultSamplerLinear, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-    w.write_image(1, _deferredRes.normalImg.imageView, _defaultSamplerLinear, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-    w.write_image(2, _deferredRes.materialImg.imageView, _defaultSamplerLinear, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    w.write_image(0, _deferredRes.albedoImg.imageView, _defaultSamplerNearest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    w.write_image(1, _deferredRes.normalImg.imageView, _defaultSamplerNearest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    w.write_image(2, _deferredRes.materialImg.imageView, _defaultSamplerNearest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     w.write_image(3, _depthImage.imageView, _defaultSamplerNearest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    w.write_image(4, _deferredRes.geoNormalImg.imageView, _defaultSamplerNearest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     w.update_set(_device, _deferredRes.shadingSet);
 
     _mainDeletionQueue.push_function([=, this]() {
@@ -2204,7 +2191,8 @@ void GLTFMetallic_Roughness::build_geometry_prepass_pipeline(VulkanEngine* engin
     pipelineBuilder.set_color_attachment_formats({ 
         engine->_deferredRes.albedoImg.imageFormat, 
         engine->_deferredRes.normalImg.imageFormat,
-        engine->_deferredRes.materialImg.imageFormat
+        engine->_deferredRes.materialImg.imageFormat,
+        engine->_deferredRes.geoNormalImg.imageFormat
     });
     pipelineBuilder.set_depth_format(engine->_depthImage.imageFormat);
 
