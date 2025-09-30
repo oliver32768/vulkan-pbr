@@ -30,6 +30,7 @@ layout(location = 0) out vec4 outAlbedo;
 layout(location = 1) out vec4 outNormal;
 layout(location = 2) out vec4 outMaterial;
 layout(location = 3) out vec4 outGeoNormal;
+layout(location = 4) out vec4 outEmissive;
 
 vec3 safeNormalize(vec3 v) { return normalize(v + 1e-8); }
 
@@ -70,14 +71,13 @@ void main() {
     //   .r = metallic
     //   .g = roughness
     //   .b = ao
-    //   .a = emissiveIntensity (or unused)
+    //   .a = unused
     vec2 mrTex = texture(metalRoughTex, vUV).gb; // roughness.g, metallic.b
     float metallic = mrTex.y * materialData.metal_rough_factors.x;
     float roughness = mrTex.x * materialData.metal_rough_factors.y;
-
     float ao = texture(AOTex, vUV).r;
-    vec3 emissive = texture(emissiveTex, vUV).rgb * materialData.emissiveFactors.rgb;
-    float emissiveI = max(max(emissive.r, emissive.g), emissive.b); // intensity proxy
+    outMaterial = vec4(metallic, roughness, ao, 1.0);
 
-    outMaterial = vec4(metallic, roughness, ao, emissiveI);
+    vec3 emissive = texture(emissiveTex, vUV).rgb * materialData.emissiveFactors.rgb;
+    outEmissive = vec4(emissive, 1.0);
 }

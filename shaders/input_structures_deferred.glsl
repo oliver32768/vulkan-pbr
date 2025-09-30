@@ -52,9 +52,10 @@ layout(std430, set = 4, binding = 3) readonly buffer LightIndexSSBO {
 
 layout(set = 5, binding = 0) uniform sampler2D gAlbedo; // RGB = baseColor, A optional
 layout(set = 5, binding = 1) uniform sampler2D gNormal; // XYZ = world normal in [-1,1] encoded to [0,1]
-layout(set = 5, binding = 2) uniform sampler2D gMaterial; // R=metal, G=rough, B=AO, A=emissiveIntensity
+layout(set = 5, binding = 2) uniform sampler2D gMaterial; // R=metal, G=rough, B=AO
 layout(set = 5, binding = 3) uniform sampler2D gDepth; // view-space depth (positive distance), single channel
 layout(set = 5, binding = 4) uniform sampler2D gGeoNormal; // geo normal
+layout(set = 5, binding = 5) uniform sampler2D gEmissive; // emissive
 
 layout(push_constant) uniform constants {
 	ivec4 screenSize;

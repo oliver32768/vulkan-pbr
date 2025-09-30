@@ -66,7 +66,7 @@ void main() {
     vec3 camPos = invView[3].xyz;
 
     // emissive is intensity only
-    vec3 emissive = vec3(emissiveI);
+    vec3 emissive = texelFetch(gEmissive, px, 0).rgb;
 
     // Lighting
     vec3 V = normalize(camPos - vWorldPos);

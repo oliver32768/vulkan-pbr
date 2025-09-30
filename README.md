@@ -27,8 +27,8 @@ Vulkan (1.3) real-time Physically Based Rendering engine, using Dynamic Renderin
 
 # Images
 
-![Bistro with 512 point lights](./readme-images/0.png)
-*Figure 1: Bistro (512 point lights at 250 FPS)*
+![Bistro with 512 point lights](./readme-images/4.png)
+*Figure 1: Amazon Lumberyard Bistro, Clustered Deferred (512 point lights at 300 FPS)*
 
 ![Cluster light count visualisation](./readme-images/1.png)
 *Figure 2: Visualisation of the light counts for the cluster at each fragment (Green = 0 to Red = 64+)*

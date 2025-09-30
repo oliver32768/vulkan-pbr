@@ -1017,6 +1017,7 @@ void VulkanEngine::init_deferred_images() {
     _deferredRes.normalImg = init_gbuffer(renderTargetExtent, renderTargetUsages, rtAllocInfo, VK_FORMAT_R16G16B16A16_SFLOAT);
     _deferredRes.materialImg = init_gbuffer(renderTargetExtent, renderTargetUsages, rtAllocInfo, VK_FORMAT_R8G8B8A8_UNORM);
     _deferredRes.geoNormalImg = init_gbuffer(renderTargetExtent, renderTargetUsages, rtAllocInfo, VK_FORMAT_R16G16B16A16_SFLOAT);
+    _deferredRes.emissiveImg = init_gbuffer(renderTargetExtent, renderTargetUsages, rtAllocInfo, VK_FORMAT_R8G8B8A8_UNORM);
 }
 
 void VulkanEngine::init_vulkan() {
@@ -1391,7 +1392,7 @@ void VulkanEngine::final_render_deferred(
 ) {
     vkutil::transition_images(
         cmd,
-        { _deferredRes.albedoImg.image, _deferredRes.normalImg.image, _deferredRes.materialImg.image, _deferredRes.geoNormalImg.image },
+        { _deferredRes.albedoImg.image, _deferredRes.normalImg.image, _deferredRes.materialImg.image, _deferredRes.geoNormalImg.image, _deferredRes.emissiveImg.image },
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_IMAGE_ASPECT_COLOR_BIT
@@ -1734,6 +1735,7 @@ void VulkanEngine::geometry_prepass(VkCommandBuffer cmd, VkViewport viewport, Vk
     VkRenderingAttachmentInfo normalAtt = vkinit::attachment_info(_deferredRes.normalImg.imageView, &clearNormal, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo materialAtt = vkinit::attachment_info(_deferredRes.materialImg.imageView, &clearMat, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo geoNormalAtt = vkinit::attachment_info(_deferredRes.geoNormalImg.imageView, &clearNormal, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo emissiveAtt = vkinit::attachment_info(_deferredRes.emissiveImg.imageView, &clearBlack, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo gbufferDepth = vkinit::depth_attachment_info(
         _depthImage.imageView,
         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
@@ -1741,7 +1743,7 @@ void VulkanEngine::geometry_prepass(VkCommandBuffer cmd, VkViewport viewport, Vk
         VK_ATTACHMENT_STORE_OP_STORE,
         0.0f, 0
     );
-    std::array<VkRenderingAttachmentInfo, 4> gbufferColors{ albedoAtt, normalAtt, materialAtt, geoNormalAtt };
+    std::array<VkRenderingAttachmentInfo, 5> gbufferColors{ albedoAtt, normalAtt, materialAtt, geoNormalAtt, emissiveAtt };
     VkRenderingInfo gbufferInfo = vkinit::rendering_info(_drawExtent, gbufferColors.data(), static_cast<uint32_t>(gbufferColors.size()), &gbufferDepth);
 
     vkCmdBeginRendering(cmd, &gbufferInfo);
@@ -1850,7 +1852,7 @@ void VulkanEngine::draw() {
 
     vkutil::transition_images(
         cmd,
-        { _drawImage.image, _deferredRes.albedoImg.image, _deferredRes.normalImg.image, _deferredRes.materialImg.image, _deferredRes.geoNormalImg.image },
+        { _drawImage.image, _deferredRes.albedoImg.image, _deferredRes.normalImg.image, _deferredRes.materialImg.image, _deferredRes.geoNormalImg.image, _deferredRes.emissiveImg.image },
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_ASPECT_COLOR_BIT
@@ -2057,6 +2059,7 @@ void VulkanEngine::init_gbuffer_descriptor_set() {
     b.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // metal/rough/ao/emissive
     b.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // depth
     b.add_binding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // geo normal
+    b.add_binding(5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // emissive
     _deferredRes.shadingSetLayout = b.build(_device, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT);
 
     DescriptorAllocatorGrowable::PoolSizeRatio sizes[] = {
@@ -2072,6 +2075,7 @@ void VulkanEngine::init_gbuffer_descriptor_set() {
     w.write_image(2, _deferredRes.materialImg.imageView, _defaultSamplerNearest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     w.write_image(3, _depthImage.imageView, _defaultSamplerNearest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     w.write_image(4, _deferredRes.geoNormalImg.imageView, _defaultSamplerNearest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    w.write_image(5, _deferredRes.emissiveImg.imageView, _defaultSamplerNearest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     w.update_set(_device, _deferredRes.shadingSet);
 
     _mainDeletionQueue.push_function([=, this]() {
@@ -2192,7 +2196,8 @@ void GLTFMetallic_Roughness::build_geometry_prepass_pipeline(VulkanEngine* engin
         engine->_deferredRes.albedoImg.imageFormat, 
         engine->_deferredRes.normalImg.imageFormat,
         engine->_deferredRes.materialImg.imageFormat,
-        engine->_deferredRes.geoNormalImg.imageFormat
+        engine->_deferredRes.geoNormalImg.imageFormat,
+        engine->_deferredRes.emissiveImg.imageFormat
     });
     pipelineBuilder.set_depth_format(engine->_depthImage.imageFormat);
 
