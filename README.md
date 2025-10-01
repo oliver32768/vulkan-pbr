@@ -35,10 +35,10 @@ Download `vulkan-pbr.zip` from Releases. Extract, and run `vulkan-pbr/bin/Releas
 1. Clone this repository
 2. Download `assets.zip` from Releases and extract into project root (i.e. path to assets should be `vulkan-pbr/assets/*.hdr` and `vulkan-pbr/assets/*.glb`)
 3. Configure and generate project files via CMake (e.g. `cmake-gui`)
- 1. "Where is the source code": `vulkan-pbr/`
- 2. "Where to build the binaries": `vulkan-pbr/bin/`
- 3. `Configure`, select Visual Studio 17 2022 generator. If it complains about not finding Vulkan, see Step 0
- 4. `Generate`, `Open Project`
+    1. "Where is the source code": `vulkan-pbr/`
+    2. "Where to build the binaries": `vulkan-pbr/bin/`
+    3. `Configure`, select Visual Studio 17 2022 generator. If it complains about not finding Vulkan, see Step 0
+    4. `Generate`, `Open Project`
 4. Set `engine` as startup project in Visual Studio
 5. Set to Release configuration, Build and run.
 
