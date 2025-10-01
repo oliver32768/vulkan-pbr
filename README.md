@@ -25,10 +25,29 @@ Vulkan (1.3) real-time Physically Based Rendering engine, using Dynamic Renderin
 - Immediate mode GUI using [Dear ImGui](https://github.com/ocornut/imgui)
 - Vulkan memory allocations using [VulkanMemoryAllocator (VMA)](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator)
 
+# Download (Windows)
+
+Download `vulkan-pbr.zip` from Releases. Extract, and run `vulkan-pbr/bin/Release/engine.exe`
+
+# Building (Windows)
+
+0. Install [Vulkan LunarG SDK](https://vulkan.lunarg.com/)
+1. Clone this repository
+2. Download `assets.zip` from Releases and extract into project root (i.e. path to assets should be `vulkan-pbr/assets/*.hdr` and `vulkan-pbr/assets/*.glb`)
+3. Configure and generate project files via CMake (e.g. `cmake-gui`)
+ 1. "Where is the source code": `vulkan-pbr/`
+ 2. "Where to build the binaries": `vulkan-pbr/bin/`
+ 3. `Configure`, select Visual Studio 17 2022 generator. If it complains about not finding Vulkan, see Step 0
+ 4. `Generate`, `Open Project`
+4. Set `engine` as startup project in Visual Studio
+5. Set to Release configuration, Build and run.
+
+Building in Release isn't mandatory, but, frametimes will be substantially worse due to validation layer overhead if built in Debug
+
 # Images
 
 ![Bistro with 512 point lights](./readme-images/4.jpg)
-*Figure 1: Amazon Lumberyard Bistro, Clustered Deferred (512 point lights at 300 FPS)*
+*Figure 1: Amazon Lumberyard Bistro, Clustered Deferred (512 point lights in ~3.3 millisecond frametimes)*
 
 ![Cluster light count visualisation](./readme-images/1.png)
 *Figure 2: Visualisation of the light counts for the cluster at each fragment (Green = 0 to Red = 64+)*
