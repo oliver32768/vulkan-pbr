@@ -386,6 +386,15 @@ struct DeferredResources {
 	VkDescriptorSet		  shadingSet{};
 };
 
+struct PostFxResources {
+	DescriptorAllocatorGrowable descriptorAllocator;
+
+	VkDescriptorSetLayout postSetLayout{};
+	VkPipelineLayout	  postPipelineLayout{};
+	VkPipeline		      postPipeline{};
+	VkDescriptorSet		  postSet{};
+};
+
 class VulkanEngine {
 public:
 	Camera mainCamera;
@@ -394,6 +403,8 @@ public:
 	std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
 	float nearPlane;
 	float farPlane;
+
+	PostFxResources _postRes;
 
 	bool useDeferred = true;
 
@@ -495,6 +506,12 @@ public:
 	
 	void draw();
 	void run();
+
+	void draw_postfx(VkCommandBuffer cmd, VkImageView swapchainImageView);
+
+	void init_postfx_descriptor_set();
+
+	void init_postfx_pipeline();
 
 	void init_deferred_shading_pipeline();
 

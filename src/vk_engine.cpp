@@ -943,6 +943,7 @@ void VulkanEngine::init_swapchain() {
     drawImageUsages |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     drawImageUsages |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     drawImageUsages |= VK_IMAGE_USAGE_STORAGE_BIT;
+    drawImageUsages |= VK_IMAGE_USAGE_SAMPLED_BIT;
 
     VkImageCreateInfo rimg_info = vkinit::image_create_info(_drawImage.imageFormat, drawImageUsages, drawImageExtent);
 
@@ -1154,6 +1155,9 @@ void VulkanEngine::init() {
 
     init_gbuffer_descriptor_set();
     init_deferred_shading_pipeline();
+
+    init_postfx_descriptor_set();
+    init_postfx_pipeline();
 
     mainCamera.velocity = glm::vec3(0.f);
     mainCamera.position = glm::vec3(-14.5, 2.5, -0.5);
@@ -1860,11 +1864,16 @@ void VulkanEngine::draw() {
     vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
     draw_geometry(cmd);
 
-    vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); // copy draw img -> swapchain img
-    vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    vkutil::copy_image_to_image(cmd, _drawImage.image, _swapchainImages[swapchainImageIndex], _drawExtent, _swapchainExtent);
+    // postfx
+    vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    draw_postfx(cmd, _swapchainImageViews[swapchainImageIndex]);
 
-    vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); // for imgui
+    //vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); // copy draw img -> swapchain img
+    //vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    //vkutil::copy_image_to_image(cmd, _drawImage.image, _swapchainImages[swapchainImageIndex], _drawExtent, _swapchainExtent);
+    //vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); // for imgui
+
     draw_imgui(cmd, _swapchainImageViews[swapchainImageIndex]);
 
     vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR); // present layout
@@ -2048,6 +2057,117 @@ void VulkanEngine::run() {
         auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
         stats.frametime = elapsed.count() / 1000.f;
     }
+}
+
+// postfx
+
+void VulkanEngine::draw_postfx(VkCommandBuffer cmd, VkImageView swapchainImageView) {
+    VkClearValue clearValue = { 0.0, 0.0, 0.0, 0.0 };
+    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(swapchainImageView, &clearValue, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingInfo renderInfo = vkinit::rendering_info(_drawExtent, &colorAttachment, nullptr);
+
+    glm::ivec4 push_constants;
+    push_constants.x = _drawExtent.width;
+    push_constants.y = _drawExtent.height;
+
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = (float)_drawExtent.width,
+        .height = (float)_drawExtent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f
+    };
+    VkRect2D scissor = {
+        .offset = {.x = 0, .y = 0 },
+        .extent = {.width = _drawExtent.width, .height = _drawExtent.height }
+    };
+
+    vkCmdBeginRendering(cmd, &renderInfo);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _postRes.postPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _postRes.postPipelineLayout, 0, 1, &_postRes.postSet, 0, nullptr);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdPushConstants(cmd, _postRes.postPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(glm::ivec4), &push_constants);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+
+    vkCmdEndRendering(cmd);
+}
+
+void VulkanEngine::init_postfx_descriptor_set() {
+    DescriptorLayoutBuilder b;
+    b.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // HDR draw image
+    _postRes.postSetLayout = b.build(_device, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT);
+
+    DescriptorAllocatorGrowable::PoolSizeRatio sizes[] = {
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8.0f }
+    };
+    _postRes.descriptorAllocator = DescriptorAllocatorGrowable{};
+    _postRes.descriptorAllocator.init(_device, 64, std::span(sizes));
+    _postRes.postSet = _postRes.descriptorAllocator.allocate(_device, _postRes.postSetLayout);
+    DescriptorWriter w;
+    w.write_image(0, _drawImage.imageView, _defaultSamplerNearest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    w.update_set(_device, _postRes.postSet);
+
+    _mainDeletionQueue.push_function([=, this]() {
+        vkDestroyDescriptorSetLayout(_device, _postRes.postSetLayout, nullptr);
+        _postRes.descriptorAllocator.destroy_pools(_device);
+    });
+}
+
+void VulkanEngine::init_postfx_pipeline() {
+    VkShaderModule fragShader;
+    if (!vkutil::load_shader_module("../../shaders/postfx.frag.spv", _device, &fragShader)) {
+        fmt::print("Error when building the deferred shading fragment shader \n");
+    }
+    else {
+        fmt::print("Deferred shading fragment shader succesfully loaded \n");
+    }
+
+    VkShaderModule vertShader;
+    if (!vkutil::load_shader_module("../../shaders/postfx.vert.spv", _device, &vertShader)) {
+        fmt::print("Error when building the deferred shading vertex shader \n");
+    }
+    else {
+        fmt::print("Deferred shading vertex shader succesfully loaded \n");
+    }
+
+    VkPushConstantRange screenDimsRange{};
+    screenDimsRange.offset = 0;
+    screenDimsRange.size = sizeof(glm::ivec4); // .xy
+    screenDimsRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayout layouts[] = {
+        _postRes.postSetLayout,
+    };
+    VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
+    pipeline_layout_info.setLayoutCount = 1;
+    pipeline_layout_info.pSetLayouts = layouts;
+    pipeline_layout_info.pPushConstantRanges = &screenDimsRange;
+    pipeline_layout_info.pushConstantRangeCount = 1;
+    VK_CHECK(vkCreatePipelineLayout(_device, &pipeline_layout_info, nullptr, &_postRes.postPipelineLayout));
+
+    PipelineBuilder pipelineBuilder;
+    pipelineBuilder._pipelineLayout = _postRes.postPipelineLayout; // use the triangle layout we created
+    pipelineBuilder.set_shaders(vertShader, fragShader); // connecting the vertex and fragment shaders to the pipeline
+    pipelineBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST); // it will draw triangles
+    pipelineBuilder.set_polygon_mode(VK_POLYGON_MODE_FILL); // filled triangles
+    pipelineBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE); // no backface culling
+    pipelineBuilder.set_multisampling_none(); // no multisampling
+    pipelineBuilder.disable_blending(); // no blending
+    pipelineBuilder.disable_depthtest();
+    pipelineBuilder.set_color_attachment_format(_swapchainImageFormat); // connect the image format we will draw into, from draw image
+    pipelineBuilder.set_depth_format(_depthImage.imageFormat);
+    _postRes.postPipeline = pipelineBuilder.build_pipeline(_device); // finally build the pipeline
+
+    vkDestroyShaderModule(_device, fragShader, nullptr);
+    vkDestroyShaderModule(_device, vertShader, nullptr);
+
+    _mainDeletionQueue.push_function([&]() {
+        vkDestroyPipelineLayout(_device, _postRes.postPipelineLayout, nullptr);
+        vkDestroyPipeline(_device, _postRes.postPipeline, nullptr);
+        });
 }
 
 // Deferred
