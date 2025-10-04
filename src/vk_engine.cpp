@@ -1121,6 +1121,7 @@ void VulkanEngine::init() {
     // metro
     // winter_evening_4k
     // hansaplatz_4k
+    // moonlit_golf_4k
     _ibl.cubemap = generate_cubemap_from_hdr("..\\..\\assets\\moonlit_golf_4k.hdr", 1024, true); 
 
     init_irradiance_cubemap_pipeline();
@@ -1970,7 +1971,6 @@ void VulkanEngine::run() {
         // Sliders shown in degrees, values kept in radians
         ImGui::SliderAngle("Azimuth", &mAzimuth, -180.0f, 180.0f);
         ImGui::SliderAngle("Zenith", &mZenith, 0.0f, 180.0f);
-        ImGui::SliderFloat("Distance", &lightDist, 1.0f, 10000.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("Intensity", &lightIntensity, 1.0f, 10000.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
         ImGui::ColorEdit3("Light Color", &lightColor[0]);
 

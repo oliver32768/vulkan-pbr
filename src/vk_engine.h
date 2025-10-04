@@ -410,8 +410,7 @@ public:
 
 	float mAzimuth = glm::radians(180.0f);
 	float mZenith = glm::radians(20.0f);
-	float lightDist = 90.0f;
-	float lightIntensity = 4.0f;
+	float lightIntensity = 10.0f;
 	glm::vec3 lightColor = glm::vec3(1.0f, 0.8f, 0.8f);
 
 	ClusteredLightResources _lightRes;
